@@ -20,3 +20,8 @@ documents:
     layer: 3
     parent: docs/implementation/INDEX.md
     summary: canonical phased implementation plan for the hybrid native Codex integration
+  - path: docs/6cx3b-agent-auto-resume-design.md
+    role: leaf
+    layer: 2
+    parent: docs/INDEX.md
+    summary: design for automatically resuming the same run after recoverable transient interruptions such as fetch failed

@@ -4,6 +4,7 @@ layer: 1
 parent: null
 children:
   - docs/implementation/INDEX.md
+  - docs/6cx3b-agent-auto-resume-design.md
 summary: primary documentation router for Codex integration planning and implementation
 read_when:
   - need the canonical documentation path for the repository
@@ -24,6 +25,7 @@ This entry routes implementation work for integrating Codex/OpenAI into the exis
 ## Open this next
 
 - `docs/implementation/INDEX.md` — open for the implementation track, fixed decisions, phases, and coding order.
+- `docs/6cx3b-agent-auto-resume-design.md` — same-run auto-resume design for recoverable transient interruptions such as `fetch failed`.
 
 ## Historical research archive
 

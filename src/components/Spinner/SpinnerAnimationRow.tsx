@@ -199,31 +199,17 @@ export function SpinnerAnimationRow({
   const thinkingOpacity = time < THINKING_DELAY_MS ? 0 : (Math.sin(thinkingElapsedSec * Math.PI * 2 / THINKING_GLOW_PERIOD_S) + 1) / 2;
   const thinkingShimmerColor = toRGBColor(interpolateColor(THINKING_INACTIVE, THINKING_INACTIVE_SHIMMER, thinkingOpacity));
 
-  // === Build status parts ===
-  const parts = [...(spinnerSuffix ? [<Text dimColor key="suffix">
-            {spinnerSuffix}
-          </Text>] : []), ...(showTimer ? [<Text dimColor key="elapsedTime">
-            {timerText}
-          </Text>] : []), ...(showTokens ? [<Box flexDirection="row" key="tokens">
-            {!hasRunningTeammates && <SpinnerModeGlyph mode={mode} />}
-            <Text dimColor>{tokenCount} tokens</Text>
-          </Box>] : []), ...(showThinking && thinkingText ? [thinkingStatus === 'thinking' && !reducedMotion ? <Text key="thinking" color={thinkingShimmerColor}>
-              {thinkingOnly ? `(${thinkingText})` : thinkingText}
-            </Text> : <Text dimColor key="thinking">
-              {thinkingText}
-            </Text>] : [])];
-  const status = foregroundedTeammate && !foregroundedTeammate.isIdle ? <>
-        <Text dimColor>(esc to interrupt </Text>
-        <Text color={toInkColor(foregroundedTeammate.identity.color)}>
-          {foregroundedTeammate.identity.agentName}
-        </Text>
-        <Text dimColor>)</Text>
-      </> : !foregroundedTeammate && parts.length > 0 ? thinkingOnly ? <Byline>{parts}</Byline> : <>
-          <Text dimColor>(</Text>
-          <Byline>{parts}</Byline>
-          <Text dimColor>)</Text>
-        </> : null;
-  return <Box ref={viewportRef} flexDirection="row" flexWrap="wrap" marginTop={1} width="100%">
+  // === Build status text ===
+  const statusParts: string[] = [];
+  if (spinnerSuffix) statusParts.push(spinnerSuffix);
+  if (showTimer) statusParts.push(timerText);
+  if (showTokens) statusParts.push(tokensText);
+  if (showThinking && thinkingText) statusParts.push(thinkingText);
+  const statusText = foregroundedTeammate && !foregroundedTeammate.isIdle ? `(esc to interrupt ${foregroundedTeammate.identity.agentName})` : !foregroundedTeammate && statusParts.length > 0 ? thinkingOnly && thinkingText ? `(${thinkingText})` : `(${statusParts.join(' · ')})` : null;
+  const status = statusText ? <Text dimColor={thinkingOnly && !foregroundedTeammate && !reducedMotion ? false : true} color={thinkingOnly && !foregroundedTeammate && !reducedMotion ? thinkingShimmerColor : undefined}>
+        {statusText}
+      </Text> : null;
+  return <Box ref={viewportRef} flexDirection="row" flexWrap="wrap" marginTop={1} width="100%" opaque>
       <SpinnerGlyph frame={frame} messageColor={messageColor} stalledIntensity={overrideColor ? 0 : stalledIntensity} reducedMotion={reducedMotion} time={time} />
       <GlimmerMessage message={message} mode={mode} messageColor={messageColor} glimmerIndex={glimmerIndex} flashOpacity={flashOpacity} shimmerColor={shimmerColor} stalledIntensity={overrideColor ? 0 : stalledIntensity} />
       {status}
