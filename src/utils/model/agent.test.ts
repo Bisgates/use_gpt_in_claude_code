@@ -56,4 +56,10 @@ describe('agent model options and display', () => {
       'gpt-5-mini',
     )
   })
+
+  test('resolves a tool-specified inherit model to the parent runtime model', () => {
+    delete process.env.CLAUDE_CODE_MODEL_BACKEND
+
+    expect(getAgentModel(undefined, 'gpt-5.4', 'inherit')).toBe('gpt-5.4')
+  })
 })

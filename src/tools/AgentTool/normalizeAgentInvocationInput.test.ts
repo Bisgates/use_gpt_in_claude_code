@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { normalizeAgentInvocationInput } from './normalizeAgentInvocationInput.js'
+import {
+  normalizeAgentInvocationInput,
+  normalizeOptionalAgentString,
+} from './normalizeAgentInvocationInput.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
 const originalModelBackend = process.env.CLAUDE_CODE_MODEL_BACKEND
@@ -20,6 +23,18 @@ afterEach(() => {
   } else {
     process.env.CLAUDE_CODE_MODEL_BACKEND = originalModelBackend
   }
+})
+
+describe('normalizeOptionalAgentString', () => {
+  test('trims non-empty values', () => {
+    expect(normalizeOptionalAgentString('  default  ')).toBe('default')
+  })
+
+  test('returns undefined for empty or whitespace-only values', () => {
+    expect(normalizeOptionalAgentString('')).toBeUndefined()
+    expect(normalizeOptionalAgentString('   ')).toBeUndefined()
+    expect(normalizeOptionalAgentString(undefined)).toBeUndefined()
+  })
 })
 
 describe('normalizeAgentInvocationInput', () => {

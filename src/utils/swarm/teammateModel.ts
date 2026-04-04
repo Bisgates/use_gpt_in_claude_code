@@ -7,8 +7,8 @@ import {
 
 // @[MODEL LAUNCH]: Update the fallback model below.
 // When the user has never set teammateDefaultModel in /config, new teammates
-// use Opus 4.6. Must be provider-aware so Bedrock/Vertex/Foundry customers get
-// the correct model ID.
+// inherit the leader's model by default. If no leader model is known yet,
+// fall back to a provider-aware default.
 export function getHardcodedTeammateModelFallback(): string {
   if (isOpenAIResponsesBackendEnabled()) {
     return resolveOpenAIModel('opus')

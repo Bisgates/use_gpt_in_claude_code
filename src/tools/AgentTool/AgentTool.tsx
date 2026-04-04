@@ -51,7 +51,7 @@ import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES }
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
-import { normalizeAgentInvocationInput } from './normalizeAgentInvocationInput.js';
+import { normalizeAgentInvocationInput, normalizeOptionalAgentString } from './normalizeAgentInvocationInput.js';
 import { getPrompt } from './prompt.js';
 import { runAgent } from './runAgent.js';
 import { renderGroupedAgentToolUse, renderToolResultMessage, renderToolUseErrorMessage, renderToolUseMessage, renderToolUseProgressMessage, renderToolUseRejectedMessage, renderToolUseTag, userFacingName, userFacingNameBackgroundColor } from './UI.js';
@@ -270,10 +270,11 @@ export const AgentTool = buildTool({
     // reaches the root store so task registration/progress/kill stay visible.
     const rootSetAppState = toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState;
 
-    // Check if user is trying to use agent teams without access
-    if (normalizedTeamName && !isAgentSwarmsEnabled()) {
-      throw new Error('Agent Teams is not yet available on your plan.');
-    }
+    // team_name is a no-op when agent teams are unavailable. Some models
+    // opportunistically fill optional tool parameters with placeholder/default
+    // values (for example team_name: "default") even when the caller did not
+    // intend to use teammate spawning. resolveTeamName() already returns
+    // undefined when swarms are disabled, so do not hard-fail here.
 
     // Teammates (in-process or tmux) passing `name` would trigger spawnTeammate()
     // below, but TeamFile.members is a flat array with one leadAgentId — nested

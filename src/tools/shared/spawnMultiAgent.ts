@@ -78,7 +78,9 @@ function getDefaultTeammateModel(leaderModel: string | null): string {
   if (configured !== undefined) {
     return parseUserSpecifiedModel(configured)
   }
-  return getHardcodedTeammateModelFallback()
+  // Unset config now follows the leader by default. Fall back only when the
+  // current session model is unavailable (e.g. very early startup).
+  return leaderModel ?? getHardcodedTeammateModelFallback()
 }
 
 /**

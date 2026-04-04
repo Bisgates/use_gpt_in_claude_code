@@ -13,18 +13,8 @@ import { Markdown } from '../../components/Markdown.js';
 import { Message as MessageComponent } from '../../components/Message.js';
 import { MessageResponse } from '../../components/MessageResponse.js';
 import { ToolUseLoader } from '../../components/ToolUseLoader.js';
-import { Box, Text } from '../../ink.js';
-import { getDumpPromptsPath } from '../../services/api/dumpPrompts.js';
-import { findToolByName, type Tools } from '../../Tool.js';
-import type { Message, ProgressMessage } from '../../types/message.js';
-import type { AgentToolProgress } from '../../types/tools.js';
-import { count } from '../../utils/array.js';
-import { getSearchOrReadFromContent, getSearchReadSummaryText } from '../../utils/collapseReadSearch.js';
-import { getDisplayPath } from '../../utils/file.js';
-import { formatDuration, formatNumber } from '../../utils/format.js';
-import { buildSubagentLookups, createAssistantMessage, EMPTY_LOOKUPS } from '../../utils/messages.js';
-import type { ModelAlias } from '../../utils/model/aliases.js';
 import { getMainLoopModel, parseUserSpecifiedModel, renderModelName } from '../../utils/model/model.js';
+import { Box, Text } from '../../ink.js';
 import type { Theme, ThemeName } from '../../utils/theme.js';
 import type { outputSchema, Progress, RemoteLaunchedOutput } from './AgentTool.js';
 import { inputSchema } from './AgentTool.js';
@@ -430,9 +420,10 @@ export function renderToolUseTag(input: Partial<{
   if (input.model) {
     const mainModel = getMainLoopModel();
     const agentModel = parseUserSpecifiedModel(input.model);
-    if (agentModel !== mainModel) {
+    const label = input.model === 'inherit' ? `inherit (${renderModelName(mainModel)})` : renderModelName(agentModel);
+    if (input.model === 'inherit' || agentModel !== mainModel) {
       tags.push(<Box key="model" flexWrap="nowrap" marginLeft={1}>
-          <Text dimColor>{renderModelName(agentModel)}</Text>
+          <Text dimColor>{label}</Text>
         </Box>);
     }
   }

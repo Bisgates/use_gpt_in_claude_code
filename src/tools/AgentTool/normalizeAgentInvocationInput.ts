@@ -7,7 +7,7 @@ import {
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
-function normalizeOptionalAgentString(
+export function normalizeOptionalAgentString(
   value: string | undefined,
 ): string | undefined {
   const normalized = value?.trim()
