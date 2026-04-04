@@ -13,6 +13,7 @@ import { Markdown } from '../../components/Markdown.js';
 import { Message as MessageComponent } from '../../components/Message.js';
 import { MessageResponse } from '../../components/MessageResponse.js';
 import { ToolUseLoader } from '../../components/ToolUseLoader.js';
+import { count } from '../../utils/array.js';
 import { getMainLoopModel, parseUserSpecifiedModel, renderModelName } from '../../utils/model/model.js';
 import { Box, Text } from '../../ink.js';
 import type { Theme, ThemeName } from '../../utils/theme.js';
