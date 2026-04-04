@@ -620,6 +620,18 @@ function getStreamEventErrorMessage(event: OpenAIResponsesStreamEvent): string {
   )
 }
 
+function isRecoverableOpenAIResponsesErrorMessage(message: string): boolean {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('fetch failed') ||
+    normalized.includes('network error') ||
+    normalized.includes('stream disconnected') ||
+    normalized.includes('connection reset') ||
+    normalized.includes('stream ended before completion') ||
+    normalized.includes('timeout')
+  )
+}
+
 function parseSseChunk(chunk: string): OpenAIResponsesStreamEvent | null {
   const lines = chunk
     .split('\n')
@@ -1085,17 +1097,25 @@ export async function* runOpenAIResponses(
           break
         }
         case 'error': {
+          const content =
+            event.error?.message ||
+            'OpenAI Responses returned an error streaming event.'
           yield createAssistantAPIErrorMessage({
-            content:
-              event.error?.message ||
-              'OpenAI Responses returned an error streaming event.',
+            content,
+            ...(isRecoverableOpenAIResponsesErrorMessage(content)
+              ? { error: 'unknown' }
+              : {}),
           })
           return
         }
         case 'response.failed':
         case 'response.incomplete': {
+          const content = getStreamEventErrorMessage(event)
           yield createAssistantAPIErrorMessage({
-            content: getStreamEventErrorMessage(event),
+            content,
+            ...(isRecoverableOpenAIResponsesErrorMessage(content)
+              ? { error: 'unknown' }
+              : {}),
           })
           return
         }
@@ -1144,7 +1164,12 @@ export async function* runOpenAIResponses(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'OpenAI Responses request failed'
-    yield createAssistantAPIErrorMessage({ content: message })
+    yield createAssistantAPIErrorMessage({
+      content: message,
+      ...(isRecoverableOpenAIResponsesErrorMessage(message)
+        ? { error: 'unknown' }
+        : {}),
+    })
   }
 }
 

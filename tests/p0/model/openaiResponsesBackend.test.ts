@@ -7,9 +7,10 @@ vi.mock('../../../src/bootstrap/state.js', () => ({
   getSessionId: () => 'session-123',
 }))
 vi.mock('../../../src/utils/messages.js', () => ({
-  createAssistantAPIErrorMessage: ({ content }: { content: string }) => ({
+  createAssistantAPIErrorMessage: ({ content, error }: { content: string; error?: string }) => ({
     type: 'assistant',
     isApiErrorMessage: true,
+    error,
     message: {
       role: 'assistant',
       model: 'uninitialized',
@@ -1388,6 +1389,7 @@ describe('openaiResponsesBackend fork contracts', () => {
       {
         type: 'assistant',
         isApiErrorMessage: true,
+        error: 'unknown',
         message: {
           role: 'assistant',
           model: 'uninitialized',
@@ -1401,6 +1403,48 @@ describe('openaiResponsesBackend fork contracts', () => {
         },
       },
     ])
+  })
+
+  it('[P0:model] marks fetch-failed style streaming interruptions as recoverable API errors for same-run auto-resume', async () => {
+    fetchOpenAIResponseMock.mockResolvedValue(
+      makeSseResponse([
+        { type: 'response.created' },
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item_id: 'msg-item-fetch-failed-1',
+          item: { type: 'message' },
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg-item-fetch-failed-1',
+          delta: 'partial output before interruption',
+        },
+        {
+          type: 'error',
+          error: { message: 'fetch failed' },
+        },
+      ]),
+    )
+
+    const outputs = await collect(
+      runOpenAIResponses({
+        messages: [],
+        systemPrompt: ['system'],
+        tools: [],
+        options: { model: 'sonnet' },
+        signal: new AbortController().signal,
+      } as any),
+    )
+
+    expect(outputs.at(-1)).toMatchObject({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      error: 'unknown',
+      message: {
+        content: [{ type: 'text', text: 'fetch failed' }],
+      },
+    })
   })
 
   it('[P0:model] emits only one message_start even if response.created appears again after the stream has already started', async () => {

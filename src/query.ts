@@ -162,6 +162,7 @@ function* yieldMissingToolResultBlocks(
  * rules, ye will be punished with an entire day of debugging and hair pulling.
  */
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
+const RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT = 3
 
 /**
  * Is this a max_output_tokens error message? If so, the streaming loop should
@@ -176,6 +177,32 @@ function isWithheldMaxOutputTokens(
   msg: Message | StreamEvent | undefined,
 ): msg is AssistantMessage {
   return msg?.type === 'assistant' && msg.apiError === 'max_output_tokens'
+}
+
+function isRecoverableInterruptionMessage(
+  msg: Message | StreamEvent | undefined,
+): msg is AssistantMessage {
+  if (msg?.type !== 'assistant' || !msg.isApiErrorMessage) {
+    return false
+  }
+
+  const text = msg.message.content
+    .filter(
+      (content): content is { type: 'text'; text: string } =>
+        content.type === 'text' && typeof (content as { text?: unknown }).text === 'string',
+    )
+    .map(content => content.text)
+    .join(' ')
+    .toLowerCase()
+
+  return (
+    text.includes('fetch failed') ||
+    text.includes('network error') ||
+    text.includes('stream disconnected') ||
+    text.includes('connection reset') ||
+    text.includes('stream ended before completion') ||
+    text.includes('timeout')
+  )
 }
 
 export type QueryParams = {
@@ -206,6 +233,7 @@ type State = {
   toolUseContext: ToolUseContext
   autoCompactTracking: AutoCompactTrackingState | undefined
   maxOutputTokensRecoveryCount: number
+  recoverableInterruptionRecoveryCount: number
   hasAttemptedReactiveCompact: boolean
   maxOutputTokensOverride: number | undefined
   pendingToolUseSummary: Promise<ToolUseSummaryMessage | null> | undefined
@@ -272,6 +300,7 @@ async function* queryLoop(
     autoCompactTracking: undefined,
     stopHookActive: undefined,
     maxOutputTokensRecoveryCount: 0,
+    recoverableInterruptionRecoveryCount: 0,
     hasAttemptedReactiveCompact: false,
     turnCount: 1,
     pendingToolUseSummary: undefined,
@@ -313,6 +342,7 @@ async function* queryLoop(
       messages,
       autoCompactTracking,
       maxOutputTokensRecoveryCount,
+      recoverableInterruptionRecoveryCount,
       hasAttemptedReactiveCompact,
       maxOutputTokensOverride,
       pendingToolUseSummary,
@@ -820,6 +850,9 @@ async function* queryLoop(
             if (isWithheldMaxOutputTokens(message)) {
               withheld = true
             }
+            if (isRecoverableInterruptionMessage(message)) {
+              withheld = true
+            }
             if (!withheld) {
               yield yieldMessage
             }
@@ -1101,6 +1134,7 @@ async function* queryLoop(
               toolUseContext,
               autoCompactTracking: tracking,
               maxOutputTokensRecoveryCount,
+              recoverableInterruptionRecoveryCount,
               hasAttemptedReactiveCompact,
               maxOutputTokensOverride: undefined,
               pendingToolUseSummary: undefined,
@@ -1154,6 +1188,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: undefined,
             maxOutputTokensRecoveryCount,
+            recoverableInterruptionRecoveryCount,
             hasAttemptedReactiveCompact: true,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1209,6 +1244,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount,
+            recoverableInterruptionRecoveryCount,
             hasAttemptedReactiveCompact,
             maxOutputTokensOverride: ESCALATED_MAX_TOKENS,
             pendingToolUseSummary: undefined,
@@ -1237,6 +1273,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount: maxOutputTokensRecoveryCount + 1,
+            recoverableInterruptionRecoveryCount: 0,
             hasAttemptedReactiveCompact,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1252,6 +1289,54 @@ async function* queryLoop(
         }
 
         // Recovery exhausted — surface the withheld error now.
+        yield lastMessage
+      }
+
+      if (isRecoverableInterruptionMessage(lastMessage)) {
+        if (
+          recoverableInterruptionRecoveryCount <
+          RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT
+        ) {
+          const interruptionDetail =
+            lastMessage.message.content
+              .filter(
+                (content): content is { type: 'text'; text: string } =>
+                  content.type === 'text' &&
+                  typeof (content as { text?: unknown }).text === 'string',
+              )
+              .map(content => content.text)
+              .join(' ') || 'transient error'
+
+          const recoveryMessage = createUserMessage({
+            content:
+              `Recoverable request interruption detected (${interruptionDetail}). Continue the same unfinished task. ` +
+              `This is not a new task. Resume from where you were interrupted. ` +
+              `Do not restart analysis, do not recap, and do not re-read already opened source unless necessary. ` +
+              `Only stop when the task is complete or user input is actually required.`,
+            isMeta: true,
+          })
+
+          state = {
+            messages: [
+              ...messagesForQuery,
+              ...assistantMessages,
+              recoveryMessage,
+            ],
+            toolUseContext,
+            autoCompactTracking: tracking,
+            maxOutputTokensRecoveryCount: 0,
+            recoverableInterruptionRecoveryCount:
+              recoverableInterruptionRecoveryCount + 1,
+            hasAttemptedReactiveCompact,
+            maxOutputTokensOverride: undefined,
+            pendingToolUseSummary: undefined,
+            stopHookActive: undefined,
+            turnCount,
+            transition: undefined,
+          }
+          continue
+        }
+
         yield lastMessage
       }
 
@@ -1289,6 +1374,7 @@ async function* queryLoop(
           toolUseContext,
           autoCompactTracking: tracking,
           maxOutputTokensRecoveryCount: 0,
+          recoverableInterruptionRecoveryCount: 0,
           // Preserve the reactive compact guard — if compact already ran and
           // couldn't recover from prompt-too-long, retrying after a stop-hook
           // blocking error will produce the same result. Resetting to false
@@ -1330,6 +1416,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount: 0,
+            recoverableInterruptionRecoveryCount: 0,
             hasAttemptedReactiveCompact: false,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,
@@ -1718,6 +1805,7 @@ async function* queryLoop(
       autoCompactTracking: tracking,
       turnCount: nextTurnCount,
       maxOutputTokensRecoveryCount: 0,
+      recoverableInterruptionRecoveryCount: 0,
       hasAttemptedReactiveCompact: false,
       pendingToolUseSummary: nextPendingToolUseSummary,
       maxOutputTokensOverride: undefined,
