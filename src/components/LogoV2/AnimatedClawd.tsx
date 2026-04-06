@@ -19,8 +19,8 @@ function hold(pose: ClawdPose, offset: number, frames: number): Frame[] {
   }));
 }
 
-// Offset semantics: marginTop in a fixed-height-3 container. 0 = normal,
-// 1 = crouched. Container height stays 3 so the layout never shifts; during
+// Offset semantics: marginTop in a fixed-height-5 container. 0 = normal,
+// 1 = crouched. Container height stays 5 so the layout never shifts; during
 // a crouch (offset=1) Clawd's feet row dips below the container and gets
 // clipped — reads as "ducking below the frame" before springing back up.
 

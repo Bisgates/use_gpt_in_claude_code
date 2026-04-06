@@ -8,7 +8,7 @@ import {
 import { Box, Text } from '../../ink.js'
 import { Clawd } from './Clawd.js'
 
-const WELCOME_V2_WIDTH = 58
+const WELCOME_V2_WIDTH = 64
 const DIVIDER = '·'.repeat(WELCOME_V2_WIDTH)
 
 export function WelcomeV2(): React.ReactNode {

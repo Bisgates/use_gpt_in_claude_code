@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { useEffect } from 'react'
-import { BRAND_ACCENT_COLOR, BRAND_NAME } from '../../constants/brand.js'
+import { BRAND_ACCENT_COLOR, BRAND_LOGO_WIDTH, BRAND_NAME } from '../../constants/brand.js'
 import { useMainLoopModel } from '../../hooks/useMainLoopModel.js'
 import { useTerminalSize } from '../../hooks/useTerminalSize.js'
 import { stringWidth } from '../../ink/stringWidth.js'
