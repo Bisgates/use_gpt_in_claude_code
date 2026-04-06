@@ -12,7 +12,10 @@ import { dirname, join } from 'node:path'
 
 const rootDir = dirname(fileURLToPath(new URL('../package.json', import.meta.url)))
 const packageJson = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf8'))
-const distDir = join(rootDir, 'dist')
+const outputDirName = process.env.CLAUDE_CODE_BUILD_OUTDIR || 'dist'
+const outputUserType = process.env.CLAUDE_CODE_BUILD_USER_TYPE?.trim() || null
+const promptVariant = process.env.CLAUDE_CODE_PROMPT_VARIANT?.trim() || null
+const distDir = join(rootDir, outputDirName)
 const outFile = join(distDir, 'cli.js')
 const vendorDir = join(rootDir, 'vendor')
 const distVendorDir = join(distDir, 'vendor')
@@ -27,15 +30,17 @@ const defines = {
   'MACRO.FEEDBACK_CHANNEL': packageJson.bugs?.url ?? packageJson.homepage,
   'MACRO.ISSUES_EXPLAINER': 'open an issue',
   'MACRO.VERSION_CHANGELOG': '',
+  ...(outputUserType ? { 'process.env.USER_TYPE': outputUserType } : {}),
+  ...(promptVariant
+    ? { 'process.env.CLAUDE_CODE_PROMPT_VARIANT': promptVariant }
+    : {}),
 }
 
 const externals = [
-  '@ant/*',
   '@anthropic-ai/claude-agent-sdk',
   '@anthropic-ai/mcpb',
   '@anthropic-ai/sandbox-runtime',
   '@anthropic-ai/sandbox-runtime/*',
-  'audio-capture.node',
   'modifiers-napi',
 ]
 

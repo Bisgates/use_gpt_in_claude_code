@@ -5,7 +5,10 @@ parent: null
 children:
   - docs/implementation/INDEX.md
   - docs/6cx3b-agent-auto-resume-design.md
-summary: primary documentation router for Codex integration planning and implementation
+  - docs/system-prompt-summary.md
+  - docs/ant-mode-summary.md
+  - docs/release-version-policy.md
+summary: primary documentation router for Codex integration planning, release policy, and implementation
 read_when:
   - need the canonical documentation path for the repository
   - need to choose the implementation document to follow before coding
@@ -26,6 +29,9 @@ This entry routes implementation work for integrating Codex/OpenAI into the exis
 
 - `docs/implementation/INDEX.md` — open for the implementation track, fixed decisions, phases, and coding order.
 - `docs/6cx3b-agent-auto-resume-design.md` — same-run auto-resume design for recoverable transient interruptions such as `fetch failed`.
+- `docs/system-prompt-summary.md` — summary of the runtime's system-level prompt surfaces and where each one is defined.
+- `docs/ant-mode-summary.md` — explanation of `USER_TYPE=ant`, internal-only behavior, and differences from external builds.
+- `docs/release-version-policy.md` — canonical release policy for keeping `package.json.version`, npm package versions, Git tags, and GitHub Releases in sync.
 
 ## Historical research archive
 

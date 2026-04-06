@@ -20,9 +20,11 @@
     "url": "https://github.com/InDreamer/co-claw-dex/issues"
   },
   "scripts": {
+    "activate-ant-cli": "bash scripts/activate-ant-cli.sh",
     "activate-cli": "bash scripts/activate-local-cli.sh",
     "bootstrap": "bash scripts/bootstrap.sh",
-    "build": "bun run scripts/build.mjs",
+    "build": "bun run scripts/build.mjs && CLAUDE_CODE_BUILD_OUTDIR=dist-ant CLAUDE_CODE_PROMPT_VARIANT=ant bun run scripts/build.mjs",
+    "build:ant": "CLAUDE_CODE_BUILD_OUTDIR=dist-ant CLAUDE_CODE_PROMPT_VARIANT=ant bun run scripts/build.mjs",
     "clean": "rm -rf dist",
     "prepublishOnly": "node -e \"if (!process.env.AUTHORIZED) { console.error('ERROR: Direct publishing is not allowed.\\nPlease see the release workflow documentation to publish this package.'); process.exit(1); }\"",
     "restore-cli": "bash scripts/restore-official-cli.sh",
