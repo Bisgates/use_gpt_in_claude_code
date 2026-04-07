@@ -5,6 +5,7 @@ import {
   logEvent,
 } from '../../services/analytics/index.js'
 import { queryHaiku } from '../../services/api/claude.js'
+import { isOpenAIResponsesBackendEnabled } from '../../services/modelBackend/openaiCodexConfig.js'
 import { AbortError } from '../../utils/errors.js'
 import { getWebFetchUserAgent } from '../../utils/http.js'
 import { logError } from '../../utils/log.js'
@@ -384,7 +385,10 @@ export async function getURLMarkdownContent(
     // This is for enterprise customers with restrictive security policies
     // that prevent outbound connections to claude.ai
     const settings = getSettings_DEPRECATED()
-    if (!settings.skipWebFetchPreflight) {
+    const shouldSkipAnthropicPreflight =
+      settings.skipWebFetchPreflight || isOpenAIResponsesBackendEnabled()
+
+    if (!shouldSkipAnthropicPreflight) {
       const checkResult = await checkDomainBlocklist(hostname)
       switch (checkResult.status) {
         case 'allowed':

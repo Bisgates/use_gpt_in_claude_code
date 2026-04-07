@@ -276,6 +276,18 @@ function emitTextStreamEvent(
     : []
 }
 
+function emitThinkingStreamEvent(
+  index: number,
+  thinking: string,
+): StreamEventMessage[] {
+  return thinking
+    ? [
+        createThinkingBlockStartStreamEvent(index),
+        createThinkingDeltaStreamEvent(index, thinking),
+      ]
+    : []
+}
+
 function getStreamContentPartKey(
   event: {
     content_index?: number
@@ -398,6 +410,60 @@ function createAssistantMessagesFromResponse(
   return {
     assistantMessages,
     unsupportedItemTypes: [...unsupportedItemTypes],
+  }
+}
+
+function hasRenderableAssistantContent(item: OpenAIResponseOutputItem): boolean {
+  if (item.type === 'message') {
+    return extractOpenAIResponseMessageBlocks(item).length > 0
+  }
+
+  if (item.type === 'reasoning') {
+    return extractOpenAIResponseReasoningText(item).length > 0
+  }
+
+  if (item.type === 'function_call') {
+    return (
+      typeof item.call_id === 'string' &&
+      item.call_id.length > 0 &&
+      typeof item.name === 'string' &&
+      item.name.length > 0
+    )
+  }
+
+  if (isOpenAIDisplayOnlyNativeItemType(item.type)) {
+    return summarizeOpenAINativeOutputItem(item).length > 0
+  }
+
+  return false
+}
+
+function mergeStreamedCompletedOutputItems(
+  response: OpenAIResponse,
+  streamedCompletedOutputItems: Map<number, OpenAIResponseOutputItem>,
+): OpenAIResponse {
+  if (streamedCompletedOutputItems.size === 0) {
+    return response
+  }
+
+  const mergedItems = new Map<number, OpenAIResponseOutputItem>()
+
+  for (const [index, item] of (response.output ?? []).entries()) {
+    mergedItems.set(index, item)
+  }
+
+  for (const [index, item] of streamedCompletedOutputItems) {
+    const existing = mergedItems.get(index)
+    if (!existing || !hasRenderableAssistantContent(existing)) {
+      mergedItems.set(index, item)
+    }
+  }
+
+  return {
+    ...response,
+    output: [...mergedItems.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, item]) => item),
   }
 }
 
@@ -741,6 +807,7 @@ export async function* runOpenAIResponses(
     const startedTextBlockIndexes = new Set<number>()
     const startedThinkingBlockIndexes = new Set<number>()
     const openToolUseBlockIndexes = new Set<number>()
+    const streamedCompletedOutputItems = new Map<number, OpenAIResponseOutputItem>()
     const customToolInputStreamedIndexes = new Set<number>()
     const audioTranscriptStreamedParts = new Set<string>()
     const reasoningSummaryPartCounts = new Map<number, number>()
@@ -1050,12 +1117,51 @@ export async function* runOpenAIResponses(
         }
         case 'response.output_item.done': {
           const index = getOutputIndexForStreamEvent(event, outputIndexes)
+          if (event.item) {
+            streamedCompletedOutputItems.set(index, event.item)
+          }
+          if (event.item?.id) {
+            outputIndexes.set(event.item.id, index)
+          }
+          if (event.item?.type) {
+            outputItemTypes.set(index, event.item.type)
+          }
           const itemType = event.item?.type ?? outputItemTypes.get(index)
           if (itemType === 'message') {
+            const text =
+              event.item?.type === 'message'
+                ? extractOpenAIResponseMessageText(event.item)
+                : ''
+            if (text) {
+              const streamEvents = startedTextBlockIndexes.has(index)
+                ? [createTextDeltaStreamEvent(index, text)]
+                : emitTextStreamEvent(index, text)
+              if (streamEvents.length > 0) {
+                startedTextBlockIndexes.add(index)
+                for (const streamEvent of streamEvents) {
+                  yield streamEvent
+                }
+              }
+            }
             if (startedTextBlockIndexes.delete(index)) {
               yield createBlockStopStreamEvent(index)
             }
           } else if (itemType === 'reasoning') {
+            const thinking =
+              event.item?.type === 'reasoning'
+                ? extractOpenAIResponseReasoningText(event.item)
+                : ''
+            if (thinking) {
+              const streamEvents = startedThinkingBlockIndexes.has(index)
+                ? [createThinkingDeltaStreamEvent(index, thinking)]
+                : emitThinkingStreamEvent(index, thinking)
+              if (streamEvents.length > 0) {
+                startedThinkingBlockIndexes.add(index)
+                for (const streamEvent of streamEvents) {
+                  yield streamEvent
+                }
+              }
+            }
             if (startedThinkingBlockIndexes.delete(index)) {
               yield createBlockStopStreamEvent(index)
             }
@@ -1139,6 +1245,11 @@ export async function* runOpenAIResponses(
         'OpenAI Responses stream finished without a completed response payload.',
       )
     }
+
+    completedResponse = mergeStreamedCompletedOutputItems(
+      completedResponse,
+      streamedCompletedOutputItems,
+    )
 
     const { assistantMessages, unsupportedItemTypes } =
       createAssistantMessagesFromResponse(

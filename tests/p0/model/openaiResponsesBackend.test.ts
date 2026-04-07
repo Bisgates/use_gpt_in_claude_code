@@ -2064,6 +2064,95 @@ describe('openaiResponsesBackend fork contracts', () => {
     ])
   })
 
+  it('[P0:model] materializes assistant text from response.output_item.done when the completed response omits output items', async () => {
+    fetchOpenAIResponseMock.mockResolvedValue(
+      makeSseResponse([
+        { type: 'response.created' },
+        {
+          type: 'response.output_item.added',
+          output_index: 0,
+          item_id: 'msg-item-done-only-1',
+          item: { type: 'message' },
+        },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item_id: 'msg-item-done-only-1',
+          item: {
+            id: 'msg-item-done-only-1',
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'done-only text' }],
+          },
+        },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp-done-only-1',
+            output: [],
+            usage: {
+              input_tokens: 1,
+              output_tokens: 1,
+            },
+          },
+        },
+      ]),
+    )
+
+    const outputs = await collect(
+      runOpenAIResponses({
+        messages: [],
+        systemPrompt: ['system'],
+        tools: [],
+        options: { model: 'sonnet' },
+        signal: new AbortController().signal,
+      } as any),
+    )
+
+    expect(outputs).toMatchObject([
+      {
+        type: 'stream_event',
+        event: {
+          type: 'message_start',
+          message: { usage: { input_tokens: 0, output_tokens: 0 } },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'text_delta', text: 'done-only text' },
+        },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'content_block_stop', index: 0 },
+      },
+      {
+        type: 'stream_event',
+        event: { type: 'message_stop' },
+      },
+      {
+        type: 'assistant',
+        requestId: 'resp-done-only-1',
+        message: {
+          id: 'msg-item-done-only-1',
+          model: 'gpt-5.2',
+          content: [{ type: 'text', text: 'done-only text', citations: [] }],
+        },
+      },
+    ])
+  })
+
   it('[P0:model] uses output_index fallback for streamed text deltas when item_id is absent from later SSE events', async () => {
     fetchOpenAIResponseMock.mockResolvedValue(
       makeSseResponse([
