@@ -3,6 +3,8 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { normalizeOpenAICompatibleModel } from './openaiModelCatalog.js'
 
+type StringMap = Record<string, string>
+
 type CodexProviderConfig = {
   providerId: string
   model: string
@@ -13,9 +15,17 @@ type CodexProviderConfig = {
   promptCacheRetention?: 'in_memory' | '24h'
   modelContextWindow?: number
   reasoningEffort?: OpenAIReasoningEffort
+  envKey?: string
+  httpHeaders?: StringMap
+  envHttpHeaders?: StringMap
+  queryParams?: StringMap
+  experimentalBearerToken?: string
 }
 
+type CodexAuthMode = 'apikey' | 'chatgpt' | 'chatgptAuthTokens'
+
 type CodexAuthConfig = {
+  authMode?: CodexAuthMode
   openaiApiKey?: string
 }
 
@@ -49,8 +59,17 @@ function readIfExists(path: string): string | null {
   }
 }
 
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function trimToUndefined(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
 function matchString(source: string, pattern: RegExp): string | undefined {
-  return source.match(pattern)?.[1]
+  return trimToUndefined(source.match(pattern)?.[1])
 }
 
 function matchBoolean(source: string, pattern: RegExp): boolean | undefined {
@@ -97,12 +116,80 @@ function normalizeReasoningEffort(
   }
 }
 
-function getProviderSection(source: string, providerId: string): string {
-  const escaped = providerId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+function normalizeAuthMode(value: string | undefined): CodexAuthMode | undefined {
+  switch (value?.trim()) {
+    case 'apikey':
+      return 'apikey'
+    case 'chatgpt':
+      return 'chatgpt'
+    case 'chatgptAuthTokens':
+      return 'chatgptAuthTokens'
+    default:
+      return undefined
+  }
+}
+
+function getTableSection(source: string, tablePath: string): string {
+  const escaped = escapeRegex(tablePath)
   const pattern = new RegExp(
-    `\\[model_providers\\.${escaped}\\]([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`,
+    `\\[${escaped}\\]([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`,
   )
   return source.match(pattern)?.[1] ?? ''
+}
+
+function getActiveProfileSection(source: string): string {
+  const profileName = matchString(source, /^profile\s*=\s*"([^"]+)"/m)
+  if (!profileName) {
+    return ''
+  }
+  return getTableSection(source, `profiles.${profileName}`)
+}
+
+function matchInlineTableBody(source: string, key: string): string | undefined {
+  const pattern = new RegExp(
+    `^\\s*${escapeRegex(key)}\\s*=\\s*\\{([^\\n]*)\\}\\s*$`,
+    'm',
+  )
+  return source.match(pattern)?.[1]
+}
+
+function parseInlineStringMap(value: string | undefined): StringMap | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  const entries: StringMap = {}
+  const pattern = /(?:"([^"]+)"|([A-Za-z0-9_.-]+))\s*=\s*"([^"]*)"/g
+
+  let match: RegExpExecArray | null
+  while ((match = pattern.exec(value)) !== null) {
+    const key = match[1] ?? match[2]
+    const entryValue = match[3]
+    if (!key) {
+      continue
+    }
+    entries[key] = entryValue
+  }
+
+  return Object.keys(entries).length > 0 ? entries : undefined
+}
+
+function mergeStringMaps(
+  ...maps: Array<StringMap | undefined>
+): StringMap | undefined {
+  const merged: StringMap = {}
+
+  for (const map of maps) {
+    if (!map) continue
+    for (const [key, value] of Object.entries(map)) {
+      const trimmed = trimToUndefined(value)
+      if (trimmed) {
+        merged[key] = trimmed
+      }
+    }
+  }
+
+  return Object.keys(merged).length > 0 ? merged : undefined
 }
 
 function normalizeBaseUrl(baseUrl: string | undefined): string {
@@ -111,6 +198,22 @@ function normalizeBaseUrl(baseUrl: string | undefined): string {
     return trimmed.slice(0, -'/responses'.length)
   }
   return trimmed
+}
+
+function getEffectiveProviderId(raw: string, profileSection: string): string {
+  return (
+    matchString(profileSection, /^\s*model_provider\s*=\s*"([^"]+)"/m) ||
+    matchString(raw, /^model_provider\s*=\s*"([^"]+)"/m) ||
+    'openai'
+  )
+}
+
+function getEffectiveModel(raw: string, profileSection: string): string {
+  return (
+    matchString(profileSection, /^\s*model\s*=\s*"([^"]+)"/m) ||
+    matchString(raw, /^model\s*=\s*"([^"]+)"/m) ||
+    DEFAULT_MODEL
+  )
 }
 
 export function loadCodexProviderConfig(): CodexProviderConfig {
@@ -126,6 +229,11 @@ export function loadCodexProviderConfig(): CodexProviderConfig {
       promptCacheRetention: undefined,
       modelContextWindow: undefined,
       reasoningEffort: undefined,
+      envKey: undefined,
+      httpHeaders: undefined,
+      envHttpHeaders: undefined,
+      queryParams: undefined,
+      experimentalBearerToken: undefined,
     }
   }
 
@@ -135,16 +243,27 @@ export function loadCodexProviderConfig(): CodexProviderConfig {
     return loadCodexProviderConfig()
   }
 
-  const providerId =
-    matchString(raw, /^model_provider\s*=\s*"([^"]+)"/m) || 'openai'
-  const topLevelModel =
-    matchString(raw, /^model\s*=\s*"([^"]+)"/m) || DEFAULT_MODEL
+  const profileSection = getActiveProfileSection(raw)
+  const providerId = getEffectiveProviderId(raw, profileSection)
+  const providerSection = getTableSection(raw, `model_providers.${providerId}`)
+  const topLevelModel = getEffectiveModel(raw, profileSection)
   const disableResponseStorage =
-    matchBoolean(raw, /^disable_response_storage\s*=\s*(true|false)/m) ?? true
-  const providerSection = getProviderSection(raw, providerId)
+    matchBoolean(
+      profileSection,
+      /^\s*disable_response_storage\s*=\s*(true|false)/m,
+    ) ??
+    matchBoolean(raw, /^disable_response_storage\s*=\s*(true|false)/m) ??
+    true
+
+  const openaiBaseUrl =
+    providerId === 'openai'
+      ? matchString(profileSection, /^\s*openai_base_url\s*=\s*"([^"]+)"/m) ||
+        matchString(raw, /^openai_base_url\s*=\s*"([^"]+)"/m)
+      : undefined
+
   const baseUrl =
     matchString(providerSection, /^\s*base_url\s*=\s*"([^"]+)"/m) ||
-    process.env.OPENAI_BASE_URL ||
+    openaiBaseUrl ||
     DEFAULT_BASE_URL
   const wireApi =
     matchString(providerSection, /^\s*wire_api\s*=\s*"([^"]+)"/m) ||
@@ -155,30 +274,38 @@ export function loadCodexProviderConfig(): CodexProviderConfig {
       /^\s*requires_openai_auth\s*=\s*(true|false)/m,
     ) ?? false
   const promptCacheRetention = normalizePromptCacheRetention(
-    matchString(raw, /^prompt_cache_retention\s*=\s*"([^"]+)"/m) ||
+    matchString(profileSection, /^\s*prompt_cache_retention\s*=\s*"([^"]+)"/m) ||
+      matchString(raw, /^prompt_cache_retention\s*=\s*"([^"]+)"/m) ||
       matchString(
         providerSection,
         /^\s*prompt_cache_retention\s*=\s*"([^"]+)"/m,
-      ) ||
-      process.env.OPENAI_PROMPT_CACHE_RETENTION,
+      ),
   )
   const modelContextWindow =
+    matchInteger(profileSection, /^\s*model_context_window\s*=\s*(\d+)/m) ||
     matchInteger(raw, /^model_context_window\s*=\s*(\d+)/m) ||
-    matchInteger(
-      providerSection,
-      /^\s*model_context_window\s*=\s*(\d+)/m,
-    ) ||
-    matchInteger(
-      process.env.OPENAI_MODEL_CONTEXT_WINDOW || '',
-      /^(\d+)$/,
-    )
+    matchInteger(providerSection, /^\s*model_context_window\s*=\s*(\d+)/m)
   const reasoningEffort = normalizeReasoningEffort(
-    process.env.OPENAI_REASONING_EFFORT ||
+    matchString(profileSection, /^\s*model_reasoning_effort\s*=\s*"([^"]+)"/m) ||
       matchString(raw, /^model_reasoning_effort\s*=\s*"([^"]+)"/m) ||
       matchString(
         providerSection,
         /^\s*model_reasoning_effort\s*=\s*"([^"]+)"/m,
       ),
+  )
+  const envKey = matchString(providerSection, /^\s*env_key\s*=\s*"([^"]+)"/m)
+  const httpHeaders = parseInlineStringMap(
+    matchInlineTableBody(providerSection, 'http_headers'),
+  )
+  const envHttpHeaders = parseInlineStringMap(
+    matchInlineTableBody(providerSection, 'env_http_headers'),
+  )
+  const queryParams = parseInlineStringMap(
+    matchInlineTableBody(providerSection, 'query_params'),
+  )
+  const experimentalBearerToken = matchString(
+    providerSection,
+    /^\s*experimental_bearer_token\s*=\s*"([^"]+)"/m,
   )
 
   cachedProviderConfig = {
@@ -191,6 +318,11 @@ export function loadCodexProviderConfig(): CodexProviderConfig {
     promptCacheRetention,
     modelContextWindow,
     reasoningEffort,
+    envKey,
+    httpHeaders,
+    envHttpHeaders,
+    queryParams,
+    experimentalBearerToken,
   }
   return cachedProviderConfig
 }
@@ -214,9 +346,17 @@ export function loadCodexAuthConfig(): CodexAuthConfig {
   }
 
   try {
-    const parsed = JSON.parse(raw) as { OPENAI_API_KEY?: string }
+    const parsed = JSON.parse(raw) as {
+      auth_mode?: string
+      OPENAI_API_KEY?: string
+    }
+    const authMode = normalizeAuthMode(parsed.auth_mode)
     cachedAuthConfig = {
-      openaiApiKey: parsed.OPENAI_API_KEY?.trim() || undefined,
+      authMode,
+      openaiApiKey:
+        authMode === 'chatgpt' || authMode === 'chatgptAuthTokens'
+          ? undefined
+          : parsed.OPENAI_API_KEY?.trim() || undefined,
     }
     return cachedAuthConfig
   } catch {
@@ -228,6 +368,20 @@ export function loadCodexAuthConfig(): CodexAuthConfig {
 export function getOpenAIApiKey(): string | undefined {
   const envKey = process.env.OPENAI_API_KEY?.trim()
   if (envKey) return envKey
+
+  const providerConfig = loadCodexProviderConfig()
+  const providerEnvKeyName = providerConfig.envKey?.trim()
+  if (providerEnvKeyName) {
+    const providerEnvKey = process.env[providerEnvKeyName]?.trim()
+    if (providerEnvKey) {
+      return providerEnvKey
+    }
+  }
+
+  if (providerConfig.experimentalBearerToken?.trim()) {
+    return providerConfig.experimentalBearerToken.trim()
+  }
+
   return loadCodexAuthConfig().openaiApiKey
 }
 
@@ -235,6 +389,22 @@ export function resolveOpenAIBaseUrl(): string {
   return normalizeBaseUrl(
     process.env.OPENAI_BASE_URL || loadCodexProviderConfig().baseUrl,
   )
+}
+
+export function resolveOpenAIProviderHeaders(): StringMap | undefined {
+  const config = loadCodexProviderConfig()
+  const envHeaders = Object.fromEntries(
+    Object.entries(config.envHttpHeaders ?? {}).flatMap(([headerName, envName]) => {
+      const value = process.env[envName]?.trim()
+      return value ? [[headerName, value]] : []
+    }),
+  )
+
+  return mergeStringMaps(config.httpHeaders, envHeaders)
+}
+
+export function resolveOpenAIProviderQueryParams(): StringMap | undefined {
+  return loadCodexProviderConfig().queryParams
 }
 
 export function shouldUseOpenAIOfficialClientHeaders(): boolean {

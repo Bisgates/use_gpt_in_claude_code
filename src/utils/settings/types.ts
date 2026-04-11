@@ -826,7 +826,7 @@ export const SettingsSchema = lazySchema(() =>
         .optional()
         .describe(
           'Custom directory for plan files, relative to project root. ' +
-            'If not set, defaults to ~/.claude/plans/',
+            'If not set, defaults to .claude/plans/',
         ),
       ...(process.env.USER_TYPE === 'ant'
         ? {

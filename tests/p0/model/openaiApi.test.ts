@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 type LoadOptions = {
   apiKey?: string
   baseUrl?: string
+  providerHeaders?: Record<string, string> | undefined
+  providerQueryParams?: Record<string, string> | undefined
   officialHeaders?: boolean
   sessionId?: string | undefined
   attachTurnMetadata?: boolean
@@ -15,6 +17,8 @@ async function loadOpenAIApiModule(options: LoadOptions = {}) {
   vi.doMock('../../../src/services/modelBackend/openaiCodexConfig.js', () => ({
     getOpenAIApiKey: () => options.apiKey,
     resolveOpenAIBaseUrl: () => options.baseUrl ?? 'https://api.example.com/v1',
+    resolveOpenAIProviderHeaders: () => options.providerHeaders,
+    resolveOpenAIProviderQueryParams: () => options.providerQueryParams,
     shouldUseOpenAIOfficialClientHeaders: () =>
       options.officialHeaders ?? false,
   }))
@@ -150,31 +154,45 @@ describe('openaiApi fork contracts', () => {
     expect(headers.get('authorization')).toBe('Bearer raw-key')
   })
 
-  it('[P0:model] resolves relative request paths against the normalized base URL and sends JSON bodies with auth headers', async () => {
+  it('[P0:model] resolves relative request paths against the normalized base URL, appends provider query params, and sends JSON bodies with auth headers', async () => {
     const fetchMock = vi.fn(async () => new Response('{"ok":true}', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
     const api = await loadOpenAIApiModule({
       apiKey: 'fallback-key',
       baseUrl: 'https://proxy.example.com/v1',
+      providerHeaders: {
+        'x-provider': 'provider-default',
+        'x-shared': 'provider-value',
+      },
+      providerQueryParams: {
+        'api-version': '2025-04-01-preview',
+      },
     })
 
     await api.fetchOpenAIResponse('responses', {
       method: 'POST',
-      headers: { 'x-extra': '1' },
+      headers: {
+        'x-extra': '1',
+        'x-shared': 'caller-value',
+      },
       body: { hello: 'world' },
     })
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
     const [url, requestInit] = fetchMock.mock.calls[0]!
-    expect(url).toBe('https://proxy.example.com/v1/responses')
+    expect(url).toBe(
+      'https://proxy.example.com/v1/responses?api-version=2025-04-01-preview',
+    )
     expect(requestInit?.method).toBe('POST')
     expect(requestInit?.body).toBe('{"hello":"world"}')
 
     const headers = requestInit?.headers as Headers
     expect(headers.get('authorization')).toBe('Bearer fallback-key')
     expect(headers.get('content-type')).toBe('application/json')
+    expect(headers.get('x-provider')).toBe('provider-default')
     expect(headers.get('x-extra')).toBe('1')
+    expect(headers.get('x-shared')).toBe('caller-value')
   })
 
   it('[P0:model] omits x-codex-turn-metadata when turn-metadata attachment is disabled even if a session id is present', async () => {
@@ -245,13 +263,14 @@ describe('openaiApi fork contracts', () => {
     expect(headers.get('x-codex-turn-metadata')).toBe('caller-turn-meta')
   })
 
-  it('[P0:model] passes through absolute URLs, avoids inventing JSON content-type for bodiless requests, and preserves raw non-JSON error payloads', async () => {
+  it('[P0:model] passes through absolute URLs without appending provider query params, avoids inventing JSON content-type for bodiless requests, and preserves raw non-JSON error payloads', async () => {
     const fetchMock = vi.fn(async () => new Response('ok', { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
     const api = await loadOpenAIApiModule({
       apiKey: 'direct-key',
       baseUrl: 'https://proxy.example.com/v1',
+      providerQueryParams: { ignored: '1' },
     })
 
     await api.fetchOpenAIResponse('https://other.example.com/custom', {

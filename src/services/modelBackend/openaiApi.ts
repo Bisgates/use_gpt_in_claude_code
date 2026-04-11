@@ -3,6 +3,8 @@ import { jsonStringify } from '../../utils/slowOperations.js'
 import {
   getOpenAIApiKey,
   resolveOpenAIBaseUrl,
+  resolveOpenAIProviderHeaders,
+  resolveOpenAIProviderQueryParams,
   shouldUseOpenAIOfficialClientHeaders,
 } from './openaiCodexConfig.js'
 import {
@@ -16,13 +18,29 @@ import type { OpenAIErrorPayload } from './openaiResponsesTypes.js'
 const MISSING_OPENAI_API_KEY_MESSAGE =
   'OPENAI_API_KEY is not configured. Expected ~/.codex/auth.json or OPENAI_API_KEY.'
 
+function appendProviderQueryParams(url: URL): URL {
+  const queryParams = resolveOpenAIProviderQueryParams()
+  if (!queryParams) {
+    return url
+  }
+
+  for (const [key, value] of Object.entries(queryParams)) {
+    if (!url.searchParams.has(key)) {
+      url.searchParams.set(key, value)
+    }
+  }
+
+  return url
+}
+
 function resolveOpenAIRequestUrl(pathOrUrl: string): string {
   if (/^https?:\/\//i.test(pathOrUrl)) {
     return pathOrUrl
   }
 
   const path = pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`
-  return `${resolveOpenAIBaseUrl()}${path}`
+  const url = new URL(`${resolveOpenAIBaseUrl()}${path}`)
+  return appendProviderQueryParams(url).toString()
 }
 
 export function normalizeOpenAIErrorMessage(
@@ -46,7 +64,15 @@ export function buildOpenAIHeaders(
   extraHeaders: HeadersInit | undefined,
   body: unknown,
 ): Headers {
-  const headers = new Headers(extraHeaders)
+  const providerHeaders = resolveOpenAIProviderHeaders()
+  const headers = new Headers(providerHeaders)
+
+  if (extraHeaders) {
+    for (const [key, value] of new Headers(extraHeaders).entries()) {
+      headers.set(key, value)
+    }
+  }
+
   headers.set('authorization', `Bearer ${apiKey}`)
   if (body !== undefined && !headers.has('content-type')) {
     headers.set('content-type', 'application/json')

@@ -10,19 +10,49 @@ import type {
   SystemFileSnapshotMessage,
   UserMessage,
 } from 'src/types/message.js'
-import { getPlanSlugCache, getSessionId } from '../bootstrap/state.js'
+import { getOriginalCwd, getPlanSlugCache, getSessionId } from '../bootstrap/state.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../tools/ExitPlanModeTool/constants.js'
-import { getCwd } from './cwd.js'
-import { logForDebugging } from './debug.js'
 import { getClaudeConfigHomeDir } from './envUtils.js'
 import { isENOENT } from './errors.js'
 import { getEnvironmentKind } from './filePersistence/outputsScanner.js'
 import { getFsImplementation } from './fsOperations.js'
 import { logError } from './log.js'
+import { logForDebugging } from './debug.js'
 import { getInitialSettings } from './settings/settings.js'
 import { generateWordSlug } from './words.js'
 
 const MAX_SLUG_RETRIES = 10
+
+function getLegacyPlansDirectory(): string {
+  return join(getClaudeConfigHomeDir(), 'plans')
+}
+
+function getDefaultPlansDirectory(): string {
+  return join(getOriginalCwd(), '.claude', 'plans')
+}
+
+function shouldUseLegacyPlanFallback(): boolean {
+  return !getInitialSettings().plansDirectory
+}
+
+function getLegacyPlanFilePath(slug: string, agentId?: AgentId): string {
+  return join(
+    getLegacyPlansDirectory(),
+    agentId ? `${slug}-agent-${agentId}.md` : `${slug}.md`,
+  )
+}
+
+async function readPlanFile(path: string): Promise<string | null> {
+  try {
+    return await getFsImplementation().readFile(path, { encoding: 'utf-8' })
+  } catch (error) {
+    if (isENOENT(error)) {
+      return null
+    }
+    logError(error)
+    return null
+  }
+}
 
 /**
  * Get or generate a word slug for the current session's plan.
@@ -73,31 +103,34 @@ export function clearAllPlanSlugs(): void {
 }
 
 // Memoized: called from render bodies (FileReadTool/FileEditTool/FileWriteTool UI.tsx)
-// and permission checks. Inputs (initial settings + cwd) are fixed at startup, so the
+// and permission checks. Inputs (initial settings + project root) are fixed at startup, so the
 // mkdirSync result is stable for the session. Without memoization, each rendered tool
 // message triggers a mkdirSync syscall (regressed in #20005).
 export const getPlansDirectory = memoize(function getPlansDirectory(): string {
   const settings = getInitialSettings()
   const settingsDir = settings.plansDirectory
   let plansPath: string
+  const projectRoot = getOriginalCwd()
 
   if (settingsDir) {
     // Settings.json (relative to project root)
-    const cwd = getCwd()
-    const resolved = resolve(cwd, settingsDir)
+    const resolved = resolve(projectRoot, settingsDir)
 
     // Validate path stays within project root to prevent path traversal
-    if (!resolved.startsWith(cwd + sep) && resolved !== cwd) {
+    if (
+      !resolved.startsWith(projectRoot + sep) &&
+      resolved !== projectRoot
+    ) {
       logError(
         new Error(`plansDirectory must be within project root: ${settingsDir}`),
       )
-      plansPath = join(getClaudeConfigHomeDir(), 'plans')
+      plansPath = getDefaultPlansDirectory()
     } else {
       plansPath = resolved
     }
   } else {
     // Default
-    plansPath = join(getClaudeConfigHomeDir(), 'plans')
+    plansPath = getDefaultPlansDirectory()
   }
 
   // Ensure directory exists (mkdirSync with recursive: true is a no-op if it exists)
@@ -137,6 +170,21 @@ export function getPlan(agentId?: AgentId): string | null {
   try {
     return getFsImplementation().readFileSync(filePath, { encoding: 'utf-8' })
   } catch (error) {
+    if (isENOENT(error) && shouldUseLegacyPlanFallback()) {
+      const legacyFilePath = getLegacyPlanFilePath(
+        getPlanSlug(getSessionId()),
+        agentId,
+      )
+      try {
+        return getFsImplementation().readFileSync(legacyFilePath, {
+          encoding: 'utf-8',
+        })
+      } catch (legacyError) {
+        if (isENOENT(legacyError)) return null
+        logError(legacyError)
+        return null
+      }
+    }
     if (isENOENT(error)) return null
     logError(error)
     return null
@@ -174,60 +222,68 @@ export async function copyPlanForResume(
   const sessionId = targetSessionId ?? getSessionId()
   setPlanSlug(sessionId, slug)
 
-  // Attempt to read the plan file directly — recovery triggers on ENOENT.
-  const planPath = join(getPlansDirectory(), `${slug}.md`)
-  try {
-    await getFsImplementation().readFile(planPath, { encoding: 'utf-8' })
+  const plansDir = getPlansDirectory()
+  const planPath = join(plansDir, `${slug}.md`)
+  const legacyPlanPath = getLegacyPlanFilePath(slug)
+
+  const existingPlan = await readPlanFile(planPath)
+  if (existingPlan !== null) {
     return true
-  } catch (e: unknown) {
-    if (!isENOENT(e)) {
-      // Don't throw — called fire-and-forget (void copyPlanForResume(...)) with no .catch()
-      logError(e)
-      return false
-    }
-    // Only attempt recovery in remote sessions (CCR) where files don't persist
-    if (getEnvironmentKind() === null) {
-      return false
-    }
+  }
 
-    logForDebugging(
-      `Plan file missing during resume: ${planPath}. Attempting recovery.`,
-    )
-
-    // Try file snapshot first (written incrementally during session)
-    const snapshotPlan = findFileSnapshotEntry(log.messages, 'plan')
-    let recovered: string | null = null
-    if (snapshotPlan && snapshotPlan.content.length > 0) {
-      recovered = snapshotPlan.content
-      logForDebugging(
-        `Plan recovered from file snapshot, ${recovered.length} chars`,
-        { level: 'info' },
-      )
-    } else {
-      // Fall back to searching message history
-      recovered = recoverPlanFromMessages(log)
-      if (recovered) {
-        logForDebugging(
-          `Plan recovered from message history, ${recovered.length} chars`,
-          { level: 'info' },
-        )
-      }
-    }
-
-    if (recovered) {
+  if (shouldUseLegacyPlanFallback()) {
+    const legacyPlan = await readPlanFile(legacyPlanPath)
+    if (legacyPlan !== null) {
       try {
-        await writeFile(planPath, recovered, { encoding: 'utf-8' })
+        await writeFile(planPath, legacyPlan, { encoding: 'utf-8' })
         return true
-      } catch (writeError) {
-        logError(writeError)
+      } catch (error) {
+        logError(error)
         return false
       }
     }
-    logForDebugging(
-      'Plan file recovery failed: no file snapshot or plan content found in message history',
-    )
+  }
+
+  // Only attempt recovery in remote sessions (CCR) where files don't persist
+  if (getEnvironmentKind() === null) {
     return false
   }
+
+  logForDebugging(
+    `Plan file missing during resume: ${planPath}. Attempting recovery.`,
+  )
+
+  // Try file snapshot first (written incrementally during session)
+  const snapshotPlan = findFileSnapshotEntry(log.messages, 'plan')
+  let recovered: string | null = null
+  if (snapshotPlan && snapshotPlan.content.length > 0) {
+    recovered = snapshotPlan.content
+    logForDebugging(`Plan recovered from file snapshot, ${recovered.length} chars`, {
+      level: 'info',
+    })
+  } else {
+    // Fall back to searching message history
+    recovered = recoverPlanFromMessages(log)
+    if (recovered) {
+      logForDebugging(`Plan recovered from message history, ${recovered.length} chars`, {
+        level: 'info',
+      })
+    }
+  }
+
+  if (recovered) {
+    try {
+      await writeFile(planPath, recovered, { encoding: 'utf-8' })
+      return true
+    } catch (writeError) {
+      logError(writeError)
+      return false
+    }
+  }
+  logForDebugging(
+    'Plan file recovery failed: no file snapshot or plan content found in message history',
+  )
+  return false
 }
 
 /**
@@ -247,17 +303,34 @@ export async function copyPlanForFork(
 
   const plansDir = getPlansDirectory()
   const originalPlanPath = join(plansDir, `${originalSlug}.md`)
+  const legacyOriginalPlanPath = getLegacyPlanFilePath(originalSlug)
 
   // Generate a new slug for the forked session (do NOT reuse the original)
   const newSlug = getPlanSlug(targetSessionId)
   const newPlanPath = join(plansDir, `${newSlug}.md`)
+
   try {
     await copyFile(originalPlanPath, newPlanPath)
     return true
   } catch (error) {
-    if (isENOENT(error)) {
+    if (!isENOENT(error)) {
+      logError(error)
       return false
     }
+  }
+
+  if (!shouldUseLegacyPlanFallback()) {
+    return false
+  }
+
+  try {
+    const legacyPlan = await readPlanFile(legacyOriginalPlanPath)
+    if (legacyPlan === null) {
+      return false
+    }
+    await writeFile(newPlanPath, legacyPlan, { encoding: 'utf-8' })
+    return true
+  } catch (error) {
     logError(error)
     return false
   }
