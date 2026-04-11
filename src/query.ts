@@ -110,6 +110,7 @@ import {
 } from './bootstrap/state.js'
 import { createBudgetTracker, checkTokenBudget } from './query/tokenBudget.js'
 import { count } from './utils/array.js'
+import { sleep } from './utils/sleep.js'
 
 /* eslint-disable @typescript-eslint/no-require-imports */
 const snipModule = feature('HISTORY_SNIP')
@@ -162,7 +163,8 @@ function* yieldMissingToolResultBlocks(
  * rules, ye will be punished with an entire day of debugging and hair pulling.
  */
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
-const RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT = 3
+const RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT = 30
+const RECOVERABLE_INTERRUPTION_RETRY_DELAY_MS = 10_000
 
 /**
  * Is this a max_output_tokens error message? If so, the streaming loop should
@@ -198,6 +200,7 @@ function isRecoverableInterruptionMessage(
   return (
     text.includes('fetch failed') ||
     text.includes('network error') ||
+    text.includes('network connection failed') ||
     text.includes('stream disconnected') ||
     text.includes('connection reset') ||
     text.includes('stream ended before completion') ||
@@ -1306,6 +1309,15 @@ async function* queryLoop(
               )
               .map(content => content.text)
               .join(' ') || 'transient error'
+
+          await sleep(
+            RECOVERABLE_INTERRUPTION_RETRY_DELAY_MS,
+            toolUseContext.abortController.signal,
+          )
+
+          if (toolUseContext.abortController.signal.aborted) {
+            return { reason: 'completed' }
+          }
 
           const recoveryMessage = createUserMessage({
             content:

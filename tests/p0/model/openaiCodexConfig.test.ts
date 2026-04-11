@@ -8,6 +8,8 @@ const ENV_KEYS = [
   'OPENAI_MODEL_CONTEXT_WINDOW',
   'OPENAI_PROMPT_CACHE_RETENTION',
   'OPENAI_REASONING_EFFORT',
+  'AZURE_OPENAI_API_KEY',
+  'EXAMPLE_HEADER_VALUE',
   'CUBENCE_DISABLE_RESPONSE_STORAGE',
   'CUBENCE_MODEL_BACKEND',
   'CLAUDE_CODE_MODEL_BACKEND',
@@ -211,6 +213,98 @@ describe('openaiCodexConfig fork contracts', () => {
     })
     expect(fromEnv.resolveOpenAIBaseUrl()).toBe('https://override.example.com/v1')
     expect(fromEnv.getOpenAIApiKey()).toBe('env-key')
+  })
+
+  it('[P0:model] applies profile overrides for model provider selection and built-in openai_base_url', async () => {
+    const profiled = await loadCodexConfigModule({
+      configToml: [
+        'profile = "work"',
+        'model = "haiku"',
+        'model_provider = "openai"',
+        'openai_base_url = "https://top-level.example.com/v1"',
+        '[model_providers.corp]',
+        'base_url = "https://corp.example.com/v1/responses/"',
+        'requires_openai_auth = true',
+        '[profiles.work]',
+        'model = "sonnet"',
+        'model_provider = "corp"',
+      ].join('\n'),
+    })
+
+    expect(profiled.loadCodexProviderConfig()).toMatchObject({
+      providerId: 'corp',
+      model: 'gpt-5.2',
+      baseUrl: 'https://corp.example.com/v1',
+      requiresOpenAIAuth: true,
+    })
+
+    const builtInOpenAI = await loadCodexConfigModule({
+      configToml: [
+        'profile = "work"',
+        '[profiles.work]',
+        'model_provider = "openai"',
+        'openai_base_url = "https://profile-openai.example.com/v1/responses/"',
+      ].join('\n'),
+    })
+
+    expect(builtInOpenAI.resolveOpenAIBaseUrl()).toBe(
+      'https://profile-openai.example.com/v1',
+    )
+  })
+
+  it('[P0:model] resolves provider API configuration fields including env_key, headers, query params, and bearer fallback', async () => {
+    const configured = await loadCodexConfigModule({
+      configToml: [
+        'model_provider = "azure"',
+        '[model_providers.azure]',
+        'base_url = "https://azure.example.com/openai"',
+        'env_key = "AZURE_OPENAI_API_KEY"',
+        'query_params = { api-version = "2025-04-01-preview" }',
+        'http_headers = { "X-Static" = "static-value" }',
+        'env_http_headers = { "X-Env" = "EXAMPLE_HEADER_VALUE" }',
+      ].join('\n'),
+      env: {
+        AZURE_OPENAI_API_KEY: 'azure-key',
+        EXAMPLE_HEADER_VALUE: 'env-header-value',
+      },
+    })
+
+    expect(configured.loadCodexProviderConfig()).toMatchObject({
+      providerId: 'azure',
+      envKey: 'AZURE_OPENAI_API_KEY',
+      queryParams: { 'api-version': '2025-04-01-preview' },
+      httpHeaders: { 'X-Static': 'static-value' },
+      envHttpHeaders: { 'X-Env': 'EXAMPLE_HEADER_VALUE' },
+    })
+    expect(configured.getOpenAIApiKey()).toBe('azure-key')
+    expect(configured.resolveOpenAIProviderHeaders()).toEqual({
+      'X-Static': 'static-value',
+      'X-Env': 'env-header-value',
+    })
+    expect(configured.resolveOpenAIProviderQueryParams()).toEqual({
+      'api-version': '2025-04-01-preview',
+    })
+
+    const bearerFallback = await loadCodexConfigModule({
+      configToml: [
+        'model_provider = "corp"',
+        '[model_providers.corp]',
+        'experimental_bearer_token = " bearer-token "',
+      ].join('\n'),
+    })
+    expect(bearerFallback.getOpenAIApiKey()).toBe('bearer-token')
+  })
+
+  it('[P0:model] only uses auth.json OPENAI_API_KEY for API-key auth mode and ignores ChatGPT login payloads', async () => {
+    const apiKeyMode = await loadCodexConfigModule({
+      authJson: '{"auth_mode":"apikey","OPENAI_API_KEY":"api-key"}',
+    })
+    expect(apiKeyMode.getOpenAIApiKey()).toBe('api-key')
+
+    const chatgptMode = await loadCodexConfigModule({
+      authJson: '{"auth_mode":"chatgpt","OPENAI_API_KEY":"should-not-be-used","tokens":{"access_token":"token"}}',
+    })
+    expect(chatgptMode.getOpenAIApiKey()).toBeUndefined()
   })
 
   it('[P0:model] lets top-level prompt-cache retention, context window, and reasoning effort override provider-section values', async () => {

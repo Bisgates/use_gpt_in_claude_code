@@ -19,6 +19,7 @@ import {
 } from './settings/settings.js'
 import { TOOL_RESULTS_SUBDIR } from './toolResultStorage.js'
 import { cleanupStaleAgentWorktrees } from './worktree.js'
+import { getPlansDirectory } from './plans.js'
 
 const DEFAULT_CLEANUP_PERIOD_DAYS = 30
 
@@ -297,9 +298,19 @@ async function cleanupSingleDirectory(
   return result
 }
 
-export function cleanupOldPlanFiles(): Promise<CleanupResult> {
-  const plansDir = join(getClaudeConfigHomeDir(), 'plans')
-  return cleanupSingleDirectory(plansDir, '.md')
+export async function cleanupOldPlanFiles(): Promise<CleanupResult> {
+  const activePlansDir = getPlansDirectory()
+  const legacyPlansDir = join(getClaudeConfigHomeDir(), 'plans')
+
+  let result = await cleanupSingleDirectory(activePlansDir, '.md')
+  if (legacyPlansDir !== activePlansDir) {
+    result = addCleanupResults(
+      result,
+      await cleanupSingleDirectory(legacyPlansDir, '.md'),
+    )
+  }
+
+  return result
 }
 
 export async function cleanupOldFileHistoryBackups(): Promise<CleanupResult> {

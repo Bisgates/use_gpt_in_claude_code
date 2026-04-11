@@ -1,13 +1,13 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code when working with code in this repository.
+This file provides guidance to Codex when working with code in this repository.
 
 ## Repo-specific workflow
-- Keep `.claude/` ignored and do not commit it.
+- Keep `.Codex/` ignored and do not commit it.
 - After changing TypeScript/runtime code, rebuild once with `npm run build`; it now refreshes both the default bundle in `dist/` and the prompt-only ant variant in `dist-ant/`.
 - Docs-only changes do not require a rebuild.
 - Use `npm run build:ant` when you only want to refresh the isolated ant-style bundle in `dist-ant/`.
-- Use `npm run activate-ant-cli` to install the sidecar launcher command `claude-codex-ant` without changing the existing `claude` / `claude-codex` links.
+- Use `npm run activate-ant-cli` to install the sidecar launcher command `Codex-codex-ant` without changing the existing `Codex` / `Codex-codex` links.
 - This fork is meant to run from source. Do not rely on official Anthropic install/update flows in this repo.
 - All release, npm publish, tag, and GitHub Release work must follow `docs/release-version-policy.md`.
 - Treat `package.json.version` as the only authoritative release version; do not introduce or preserve a second formal version source in scripts, CI, or release notes.
@@ -43,8 +43,8 @@ This file provides guidance to Claude Code when working with code in this reposi
 - `src/Tool.ts` defines the shared tool contract and tool-use context. `src/tools.ts` is the source of truth for which built-in tools are exposed in a session.
 - `src/query.ts` is the core turn loop. It normalizes transcript state, manages compact/recovery behavior, streams model output, and feeds tool calls back into the local runtime.
 - Tool execution lives under `src/services/tools/`. `toolOrchestration.ts` batches concurrency-safe/read-only tool calls together and runs state-changing tools serially.
-- Model-provider selection lives in `src/services/modelBackend/index.ts`. This fork defaults to `openaiResponses`, but still keeps a Claude backend implementation for compatibility.
-- `src/services/modelBackend/openaiResponsesBackend.ts` is the critical adapter for this fork: it translates the internal Claude-shaped transcript/tool protocol into OpenAI Responses API input items and maps streamed/native output back into local message/tool events.
+- Model-provider selection lives in `src/services/modelBackend/index.ts`. This fork defaults to `openaiResponses`, but still keeps a Codex backend implementation for compatibility.
+- `src/services/modelBackend/openaiResponsesBackend.ts` is the critical adapter for this fork: it translates the internal Codex-shaped transcript/tool protocol into OpenAI Responses API input items and maps streamed/native output back into local message/tool events.
 - `src/services/modelBackend/openaiApi.ts` is the HTTP boundary for OpenAI requests. Keep auth/header behavior there instead of scattering fetch logic.
 - The fork’s architecture intentionally keeps local runtime authority for tool execution and approvals. The OpenAI integration is an adapter layer, not a switch to provider-native execution.
 
@@ -58,12 +58,6 @@ This file provides guidance to Claude Code when working with code in this reposi
 - The most important automated coverage is under `tests/p0/`, especially the `model`, `tool`, and `protocol` subtrees.
 - These tests protect the fork-specific contracts around OpenAI Responses translation, tool orchestration, and remote/protocol behavior. If you change backend translation or tool execution semantics, update/add P0 tests first.
 
-## context-os
-- This project uses `.context_os/` as the phase 1 task runtime.
-- `.context_os/STATE.md` is the single entry point for task status and resume.
-- Stable task paths live under `.context_os/tasks/<task_id>/` and do not change when status changes.
-- Default operation allows only one active task unless the user explicitly requests parallel tasks.
-- Core task files are `0-meta.md`, `1-objective.md`, `2-context.md`, and `3-log.md`.
-- Optional task files are `4-decisions.md`, `8-remaining.md`, and `9-completion.md`.
-- Phase 1 is only for task checkpoint/resume runtime; do not build a knowledge base, doc system, `knowledge/`, or `INDEX.md`.
-- `resume-refresh` is a hard protocol rule: after `resume`, refresh `current_focus`, `next_action`, `blocker`, and stale context instead of copying the old checkpoint blindly.
+## Repo-specific operational notes
+- `scripts/build.mjs` builds `src/entrypoints/cli.tsx` with Bun, writes `dist/cli.js`, adds the shebang, and copies `vendor/` into `dist/vendor/`.
+- `npm run activate-cli` and `npm run restore-cli` modify `/opt/homebrew/bin/Codex*` symlinks for local source-first use. Treat them as machine-local setup steps, not routine test commands.
