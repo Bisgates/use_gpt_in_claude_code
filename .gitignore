@@ -149,3 +149,4 @@ vite.config.ts.timestamp-*
 
 # Claude local workspace
 .claude/
+.context_os/

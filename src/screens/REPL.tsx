@@ -26,6 +26,9 @@ import * as React from 'react';
 import { useEffect, useMemo, useRef, useState, useCallback, useDeferredValue, useLayoutEffect, type RefObject } from 'react';
 import { useNotifications } from '../context/notifications.js';
 import { sendNotification } from '../services/notifier.js';
+import { isTelegramConfigured } from '../services/telegram/config.js';
+import { sendTelegramMessage } from '../services/telegram/sender.js';
+import { getLastInteractionTime } from '../bootstrap/state.js';
 import { startPreventSleep, stopPreventSleep } from '../services/preventSleep.js';
 import { useTerminalNotification } from '../ink/useTerminalNotification.js';
 import { hasCursorUpViewportYankBug } from '../ink/terminal.js';
@@ -2929,6 +2932,15 @@ export function REPL({
         // onQueryImpl only on successful completion.
         resetLoadingState();
         await mrOnTurnComplete(messagesRef.current, abortController.signal.aborted);
+
+        // Send Telegram notification on turn complete (not aborted),
+        // but only if user has been idle for >15s (skip quick interactions like /clear)
+        if (!abortController.signal.aborted && isTelegramConfigured()) {
+          const idleSinceLastInput = Date.now() - getLastInteractionTime();
+          if (idleSinceLastInput > 15_000) {
+            void sendTelegramMessage('Claude Code: task completed, waiting for your input.');
+          }
+        }
 
         // Notify bridge clients that the turn is complete so mobile apps
         // can stop the spark animation and show post-turn UI.

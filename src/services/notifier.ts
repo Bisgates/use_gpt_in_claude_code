@@ -8,6 +8,8 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from './analytics/index.js'
+import { isTelegramConfigured } from './telegram/config.js'
+import { sendTelegramMessage } from './telegram/sender.js'
 
 export type NotificationOptions = {
   message: string
@@ -25,6 +27,14 @@ export async function sendNotification(
   await executeNotificationHooks(notif)
 
   const methodUsed = await sendToChannel(channel, notif, terminal)
+
+  // Fire-and-forget Telegram notification in parallel.
+  // Skip idle_prompt — turn-complete in REPL.tsx already covers this.
+  if (isTelegramConfigured() && notif.notificationType !== 'idle_prompt') {
+    const title = notif.title || 'Claude Code'
+    const text = `${title}\n${notif.message}`
+    void sendTelegramMessage(text)
+  }
 
   logEvent('tengu_notification_method_used', {
     configured_channel:
