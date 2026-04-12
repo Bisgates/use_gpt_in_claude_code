@@ -101,15 +101,27 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Resolve release summary
+        id: release_summary
+        env:
+          TAG_NAME: ${{ needs.validate_build.outputs.expected_tag }}
+        run: |
+          SUMMARY="$(git tag -l --format='%(contents:subject)' "$TAG_NAME" | head -n 1)"
+          if [ -z "$SUMMARY" ]; then
+            SUMMARY="$(git log -1 --format=%s "$TAG_NAME")"
+          fi
+          printf 'summary=%s\n' "$SUMMARY" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ needs.validate_build.outputs.expected_tag }}
           RELEASE_TITLE: ${{ needs.validate_build.outputs.expected_tag }}
           IS_PRERELEASE: ${{ needs.validate_build.outputs.is_prerelease }}
+          RELEASE_SUMMARY: ${{ steps.release_summary.outputs.summary }}
         run: |
           if [ "$IS_PRERELEASE" = "true" ]; then
-            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --generate-notes --verify-tag --prerelease
+            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --notes "Summary: $RELEASE_SUMMARY" --generate-notes --verify-tag --prerelease
           else
-            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --generate-notes --verify-tag
+            gh release create "$TAG_NAME" --title "$RELEASE_TITLE" --notes "Summary: $RELEASE_SUMMARY" --generate-notes --verify-tag
           fi

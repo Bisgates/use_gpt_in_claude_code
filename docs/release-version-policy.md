@@ -96,6 +96,8 @@ release PR 合并后，`main` 上的目标 commit 就是待发布内容。
 
 - `package.json.version = 2.1.89` 时，tag 必须是 `v2.1.89`
 - `package.json.version = 2.1.90-beta.1` 时，tag 必须是 `v2.1.90-beta.1`
+- 后续正式发版默认应在 tag message 中写一句话摘要，例如：`telegram 支持关闭`
+- 当前 release workflow 会把这句一句话摘要 prepend 到 GitHub Release 正文顶部；若 tag 没有注释，则回退到 tag 所指 commit 的 subject
 
 ### 4. 由 tag 触发正式发版自动化
 
