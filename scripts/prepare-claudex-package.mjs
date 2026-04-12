@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 
 const rootDir = dirname(fileURLToPath(new URL('../package.json', import.meta.url)))
 const outDir = join(rootDir, '.build', 'claudex')
-const distSourceDir = join(rootDir, 'dist-ant')
+const distSourceDir = join(rootDir, 'dist')
 const sanitizedBuildRootMarker = '<claudex-build-root>'
 
 rmSync(outDir, { recursive: true, force: true })
@@ -48,7 +48,7 @@ const publishPackage = {
   bin: {
     claudex: 'cli.js',
   },
-  files: ['cli.js', 'dist-ant/**', 'README.md'],
+  files: ['cli.js', 'dist/**', 'README.md'],
   scripts: {
     prepublishOnly:
       "node -e \"const isAuthorized = process.env.AUTHORIZED === '1'; const isCi = process.env.CI === 'true'; const isGitHubActions = process.env.GITHUB_ACTIONS === 'true'; if (!isAuthorized || !isCi || !isGitHubActions) { console.error('ERROR: Direct publishing is not allowed.\\nPublish the generated package only from the authorized GitHub Actions release workflow.'); process.exit(1); }\"",
@@ -62,7 +62,7 @@ writeFileSync(
 
 writeFileSync(
   join(outDir, 'cli.js'),
-  "#!/usr/bin/env node\n\nimport './dist-ant/cli.js'\n",
+  "#!/usr/bin/env node\n\nimport './dist/cli.js'\n",
   { mode: 0o755 },
 )
 
@@ -85,9 +85,9 @@ npm update -g ${publishPackageName}
 `
 writeFileSync(join(outDir, 'README.md'), readme)
 
-cpSync(distSourceDir, join(outDir, 'dist-ant'), { recursive: true })
+cpSync(distSourceDir, join(outDir, 'dist'), { recursive: true })
 
-const packagedCliPath = join(outDir, 'dist-ant', 'cli.js')
+const packagedCliPath = join(outDir, 'dist', 'cli.js')
 const packagedCli = readFileSync(packagedCliPath, 'utf8')
 const sanitizedCli = packagedCli.split(rootDir).join(sanitizedBuildRootMarker)
 if (sanitizedCli !== packagedCli) {
@@ -95,7 +95,7 @@ if (sanitizedCli !== packagedCli) {
 }
 
 try {
-  unlinkSync(join(outDir, 'dist-ant', 'cli.js.map'))
+  unlinkSync(join(outDir, 'dist', 'cli.js.map'))
 } catch {
   // source map is optional in publish output
 }

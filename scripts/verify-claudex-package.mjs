@@ -22,10 +22,10 @@ const forbiddenEntryPatterns = [
   /(^|\/)history\.jsonl$/,
   /(^|\/)MEMORY\.md$/,
   /(^|\/)settings\.local\.json$/,
-  /(^|\/)package\/dist-ant\/.*\.jsonl$/,
-  /(^|\/)package\/dist-ant\/.*\.log$/,
-  /(^|\/)package\/dist-ant\/.*\.cast$/,
-  /(^|\/)package\/dist-ant\/.*\.map$/,
+  /(^|\/)package\/dist\/.*\.jsonl$/,
+  /(^|\/)package\/dist\/.*\.log$/,
+  /(^|\/)package\/dist\/.*\.cast$/,
+  /(^|\/)package\/dist\/.*\.map$/,
 ]
 
 function sanitizePath(value) {
