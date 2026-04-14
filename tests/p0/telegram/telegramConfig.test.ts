@@ -92,6 +92,9 @@ describe('telegram/config', () => {
       botToken: 'file-token',
       chatId: '12345',
       enabled: true,
+      remoteEnabled: true,
+      interactionSessionId: 'session-1',
+      lastUpdateId: 42,
     }
     mockReadFileSync.mockReturnValue(JSON.stringify(stored))
     vi.resetModules()
@@ -154,6 +157,33 @@ describe('telegram/config', () => {
     setTelegramGloballyEnabled(false)
     expect(mockSaveGlobalConfig).toHaveBeenCalled()
     expect(isTelegramGloballyEnabled()).toBe(false)
+  })
+
+  it('preserves remote state when env vars override credentials', async () => {
+    process.env.TELEGRAM_BOT_TOKEN = 'env-token'
+    process.env.TELEGRAM_CHAT_ID = 'env-chat'
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({
+        botToken: 'file-token',
+        chatId: 'file-chat',
+        enabled: true,
+        remoteEnabled: true,
+        interactionSessionId: 'session-1',
+        lastUpdateId: 99,
+      }),
+    )
+    vi.resetModules()
+    const { readTelegramConfig } = await import(
+      'src/services/telegram/config.js'
+    )
+    expect(readTelegramConfig()).toEqual({
+      botToken: 'env-token',
+      chatId: 'env-chat',
+      enabled: true,
+      remoteEnabled: true,
+      interactionSessionId: 'session-1',
+      lastUpdateId: 99,
+    })
   })
 
   it('isTelegramConfigured returns true when properly configured and globally enabled', async () => {

@@ -28,7 +28,9 @@ import { useNotifications } from '../context/notifications.js';
 import { sendNotification } from '../services/notifier.js';
 import { shouldSendTelegramNotifications } from '../services/telegram/config.js';
 import { sendTelegramMessage } from '../services/telegram/sender.js';
-import { getLastInteractionTime } from '../bootstrap/state.js';
+import { sendTelegramTurnComplete, sendTelegramWaitState, shouldSendTelegramInteractionUpdates } from '../services/telegram/interactionNotifier.js';
+import { startTelegramRemotePolling } from '../services/telegram/remote.js';
+import { getLastInteractionTime, getSessionId } from '../bootstrap/state.js';
 import { startPreventSleep, stopPreventSleep } from '../services/preventSleep.js';
 import { useTerminalNotification } from '../ink/useTerminalNotification.js';
 import { hasCursorUpViewportYankBug } from '../ink/terminal.js';
@@ -676,6 +678,7 @@ export function REPL({
   const store = useAppStateStore();
   const terminal = useTerminalNotification();
   const mainLoopModel = useMainLoopModel();
+  const sessionId = getSessionId();
 
   // Note: standaloneAgentContext is initialized in main.tsx (via initialState) or
   // ResumeConversation.tsx (via setAppState before rendering REPL) to avoid
@@ -683,6 +686,14 @@ export function REPL({
 
   // Local state for commands (hot-reloadable when skill files change)
   const [localCommands, setLocalCommands] = useState(initialCommands);
+  const lastTelegramWaitKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const handle = startTelegramRemotePolling(sessionId);
+    return () => {
+      handle.stop();
+    };
+  }, [sessionId]);
 
   // Watch for skill file changes and reload all commands
   useSkillsChange(isRemoteSession ? undefined : getProjectRoot(), setLocalCommands);
@@ -1118,6 +1129,100 @@ export function REPL({
     resolve: (response: PromptResponse) => void;
     reject: (error: Error) => void;
   }>>([]);
+
+  useEffect(() => {
+    if (!shouldSendTelegramInteractionUpdates(sessionId)) {
+      lastTelegramWaitKeyRef.current = null;
+      return;
+    }
+
+    const toolPermission = toolUseConfirmQueue[0];
+    if (toolPermission) {
+      const nextKey = `tool:${toolPermission.toolUseID}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        const toolName = toolPermission.tool.name;
+        const description = toolPermission.description
+          ? `Request: ${toolPermission.description}`
+          : undefined;
+        void sendTelegramWaitState(sessionId, `tool permission (${toolName})`, description ? [description] : []);
+      }
+      return;
+    }
+
+    const promptRequest = promptQueue[0];
+    if (promptRequest) {
+      const nextKey = `prompt:${promptRequest.request.prompt}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        const details = [
+          `Prompt: ${promptRequest.title}`,
+          promptRequest.request.message,
+          promptRequest.toolInputSummary ?? undefined,
+        ].filter(Boolean) as string[];
+        void sendTelegramWaitState(sessionId, 'prompt response', details);
+      }
+      return;
+    }
+
+    const sandboxRequest = sandboxPermissionRequestQueue[0] ?? pendingSandboxRequest;
+    if (sandboxRequest) {
+      const host = 'host' in sandboxRequest ? sandboxRequest.host : undefined;
+      const nextKey = `sandbox:${host ?? 'unknown'}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        void sendTelegramWaitState(
+          sessionId,
+          'sandbox network approval',
+          host ? [`Host: ${host}`] : [],
+        );
+      }
+      return;
+    }
+
+    if (pendingWorkerRequest) {
+      const nextKey = `worker:${pendingWorkerRequest.toolUseId}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        void sendTelegramWaitState(sessionId, `worker request (${pendingWorkerRequest.toolName})`, [pendingWorkerRequest.description]);
+      }
+      return;
+    }
+
+    const workerSandboxRequest = workerSandboxPermissions.queue[0];
+    if (workerSandboxRequest) {
+      const nextKey = `worker-sandbox:${workerSandboxRequest.requestId}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        void sendTelegramWaitState(sessionId, 'worker sandbox approval', [
+          `Worker: ${workerSandboxRequest.workerName}`,
+          `Host: ${workerSandboxRequest.host}`,
+        ]);
+      }
+      return;
+    }
+
+    const elicitationRequest = elicitation.queue[0];
+    if (elicitationRequest) {
+      const nextKey = `elicitation:${String(elicitationRequest.requestId)}`;
+      if (lastTelegramWaitKeyRef.current !== nextKey) {
+        lastTelegramWaitKeyRef.current = nextKey;
+        void sendTelegramWaitState(sessionId, `MCP elicitation (${elicitationRequest.serverName})`, [elicitationRequest.params.message]);
+      }
+      return;
+    }
+
+    lastTelegramWaitKeyRef.current = null;
+  }, [
+    sessionId,
+    toolUseConfirmQueue,
+    promptQueue,
+    sandboxPermissionRequestQueue,
+    pendingSandboxRequest,
+    pendingWorkerRequest,
+    workerSandboxPermissions,
+    elicitation,
+  ]);
 
   // Track bridge cleanup functions for sandbox permission requests so the
   // local dialog handler can cancel the remote prompt when the local user
@@ -2938,7 +3043,11 @@ export function REPL({
         if (!abortController.signal.aborted && shouldSendTelegramNotifications()) {
           const idleSinceLastInput = Date.now() - getLastInteractionTime();
           if (idleSinceLastInput > 15_000) {
-            void sendTelegramMessage('Claude Code: task completed, waiting for your input.');
+            if (shouldSendTelegramInteractionUpdates(sessionId)) {
+              void sendTelegramTurnComplete(sessionId, messagesRef.current);
+            } else {
+              void sendTelegramMessage('Claude Code: task completed, waiting for your input.');
+            }
           }
         }
 

@@ -1,4 +1,5 @@
 import { logError } from '../../utils/log.js'
+import { getTelegramFetchOptions } from './fetchOptions.js'
 import { readTelegramConfig } from './config.js'
 
 const TELEGRAM_API = 'https://api.telegram.org'
@@ -24,6 +25,7 @@ export async function sendTelegramMessage(text: string): Promise<boolean> {
         text,
       }),
       signal: controller.signal,
+      ...getTelegramFetchOptions(),
     })
 
     clearTimeout(timer)
@@ -47,7 +49,10 @@ export async function validateTelegramBot(botToken: string): Promise<{ ok: boole
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), TIMEOUT_MS)
 
-    const res = await fetch(url, { signal: controller.signal })
+    const res = await fetch(url, {
+      signal: controller.signal,
+      ...getTelegramFetchOptions(),
+    })
     clearTimeout(timer)
 
     if (!res.ok) return { ok: false }
