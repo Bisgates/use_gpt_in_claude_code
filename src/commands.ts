@@ -1,6 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: ANT-ONLY import markers must not be reordered
 import addDir from './commands/add-dir/index.js'
-import antMode from './commands/ant-mode/index.js'
 import opusMode from './commands/opus-mode/index.js'
 import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
@@ -263,7 +262,6 @@ const COMMANDS = memoize((): Command[] => [
   addDir,
   advisor,
   agents,
-  antMode,
   opusMode,
   branch,
   btw,

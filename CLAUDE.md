@@ -10,7 +10,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 - All release, npm publish, tag, and GitHub Release work must follow `docs/release-version-policy.md`.
 - Future releases should include a one-line summary in the tag message (for example: `telegram 支持关闭`); the release workflow prepends it to the GitHub Release body.
 - Treat `package.json.version` as the only authoritative release version; do not introduce or preserve a second formal version source in scripts, CI, or release notes.
-- Ant prompt mode is a runtime toggle: use `--ant` flag at startup or `/ant` command mid-session. No separate build required.
+- Opus prompt mode is the default runtime behavior. `/opus` can toggle it off or back on mid-session; `--opus` explicitly starts with it enabled.
 
 ## Common commands
 - Install dependencies: `npm install`

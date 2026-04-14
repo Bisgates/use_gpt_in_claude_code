@@ -199,9 +199,7 @@ type State = {
   mainThreadAgentType: string | undefined
   // Remote mode (--remote flag)
   isRemoteMode: boolean
-  // Ant prompt mode (--ant flag or /ant toggle)
-  antPromptMode: boolean
-  // Opus prompt mode (--opus flag or /opus toggle)
+  // Opus prompt mode (default on; /opus toggle)
   opusPromptMode: boolean
   // Direct connect server URL (for display in header)
   directConnectServerUrl: string | undefined
@@ -396,10 +394,8 @@ function getInitialState(): State {
     mainThreadAgentType: undefined,
     // Remote mode
     isRemoteMode: false,
-    // Ant prompt mode
-    antPromptMode: false,
-    // Opus prompt mode
-    opusPromptMode: false,
+    // Opus prompt mode (default on)
+    opusPromptMode: true,
     ...(process.env.USER_TYPE === 'ant'
       ? {
           replBridgeActive: false,
@@ -1654,14 +1650,6 @@ export function getIsRemoteMode(): boolean {
 
 export function setIsRemoteMode(value: boolean): void {
   STATE.isRemoteMode = value
-}
-
-export function getAntPromptMode(): boolean {
-  return STATE.antPromptMode
-}
-
-export function setAntPromptMode(value: boolean): void {
-  STATE.antPromptMode = value
 }
 
 export function getOpusPromptMode(): boolean {

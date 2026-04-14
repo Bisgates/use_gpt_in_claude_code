@@ -89,7 +89,7 @@ import { isAnalyticsDisabled } from 'src/services/analytics/config.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from 'src/services/analytics/index.js';
 import { initializeAnalyticsGates } from 'src/services/analytics/sink.js';
-import { getOriginalCwd, setAdditionalDirectoriesForClaudeMd, setAntPromptMode, setOpusPromptMode, setIsRemoteMode, setMainLoopModelOverride, setMainThreadAgentType, setTeleportedSessionInfo } from './bootstrap/state.js';
+import { getOriginalCwd, setAdditionalDirectoriesForClaudeMd, setOpusPromptMode, setIsRemoteMode, setMainLoopModelOverride, setMainThreadAgentType, setTeleportedSessionInfo } from './bootstrap/state.js';
 import { filterCommandsForRemoteMode, getCommands } from './commands.js';
 import type { StatsStore } from './context/stats.js';
 import { launchAssistantInstallWizard, launchAssistantSessionChooser, launchInvalidSettingsDialog, launchResumeChooser, launchSnapshotUpdateDialog, launchTeleportRepoMismatchDialog, launchTeleportResumeWrapper } from './dialogLaunchers.js';
@@ -1111,7 +1111,7 @@ async function run(): Promise<CommanderCommand> {
   // `mcp` and `add` as paths, then choked on --transport as an unknown
   // top-level option. Single-value + collect accumulator means each
   // --plugin-dir takes exactly one arg; repeat the flag for multiple dirs.
-  .option('--plugin-dir <path>', 'Load plugins from a directory for this session only (repeatable: --plugin-dir A --plugin-dir B)', (val: string, prev: string[]) => [...prev, val], [] as string[]).option('--disable-slash-commands', 'Disable all skills', () => true).option('--ant', 'Start in ant prompt mode (stricter comments, thoroughness, output efficiency)', () => true).option('--opus', 'Start in opus prompt mode (deeper analysis, stronger structure, higher proactivity)', () => true);
+  .option('--plugin-dir <path>', 'Load plugins from a directory for this session only (repeatable: --plugin-dir A --plugin-dir B)', (val: string, prev: string[]) => [...prev, val], [] as string[]).option('--disable-slash-commands', 'Disable all skills', () => true).option('--opus', 'Start with opus prompt mode enabled (default behavior)', () => true);
   if (!isOpenAIBackendEnabledForCli()) {
     program.option('--chrome', 'Enable browser side-panel integration').option('--no-chrome', 'Disable browser side-panel integration');
   }
@@ -1127,14 +1127,7 @@ async function run(): Promise<CommanderCommand> {
       process.env.CLAUDE_CODE_SIMPLE = '1';
     }
 
-    // --ant = enable ant prompt mode at startup
-    if ((options as {
-      ant?: boolean;
-    }).ant) {
-      setAntPromptMode(true);
-    }
-
-    // --opus = enable opus prompt mode at startup
+    // --opus = explicitly enable opus prompt mode at startup (default is on)
     if ((options as {
       opus?: boolean;
     }).opus) {
