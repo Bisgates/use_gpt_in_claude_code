@@ -91,10 +91,10 @@ describe('telegram command interaction notifications', () => {
     mockGetSessionTelegramNotificationsEnabled.mockReturnValue(true)
   })
 
-  it('sends a Telegram confirmation when interaction is bound to the current session', async () => {
+  it('sends a Telegram confirmation when inter is bound to the current session', async () => {
     const { call } = await import('src/commands/telegram/telegram.js')
 
-    const result = await call('interaction')
+    const result = await call('inter')
 
     expect(result).toEqual({
       type: 'text',
@@ -105,10 +105,21 @@ describe('telegram command interaction notifications', () => {
     expect(mockSendTelegramInteractionConnected).toHaveBeenCalledWith('session-1')
   })
 
-  it('sends a Telegram notification when clearing the interaction session', async () => {
+  it('keeps interaction as a backward-compatible alias', async () => {
     const { call } = await import('src/commands/telegram/telegram.js')
 
-    const result = await call('interaction clear')
+    const result = await call('interaction')
+
+    expect(result).toEqual({
+      type: 'text',
+      value: 'Telegram interaction session set to current session: session-1',
+    })
+  })
+
+  it('sends a Telegram notification when clearing inter session', async () => {
+    const { call } = await import('src/commands/telegram/telegram.js')
+
+    const result = await call('inter clear')
 
     expect(result).toEqual({
       type: 'text',

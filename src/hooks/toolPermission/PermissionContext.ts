@@ -60,6 +60,10 @@ type PermissionQueueOps = {
   update(toolUseID: string, patch: Partial<ToolUseConfirm>): void
 }
 
+type PermissionQueuePushInterceptor = (
+  item: ToolUseConfirm,
+) => boolean | Promise<boolean>
+
 type ResolveOnce<T> = {
   resolve(value: T): void
   isResolved(): boolean
@@ -358,9 +362,19 @@ function createPermissionQueueOps(
   setToolUseConfirmQueue: React.Dispatch<
     React.SetStateAction<ToolUseConfirm[]>
   >,
+  interceptPush?: PermissionQueuePushInterceptor,
 ): PermissionQueueOps {
   return {
     push(item: ToolUseConfirm) {
+      if (interceptPush) {
+        void Promise.resolve(interceptPush(item)).then(handled => {
+          if (!handled) {
+            setToolUseConfirmQueue(queue => [...queue, item])
+          }
+        })
+        return
+      }
+
       setToolUseConfirmQueue(queue => [...queue, item])
     },
     remove(toolUseID: string) {

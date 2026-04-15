@@ -2,6 +2,8 @@ import { c as _c } from "react/compiler-runtime";
 import { feature } from 'bun:bundle';
 import * as React from 'react';
 import { getAllowedChannels, getQuestionPreviewFormat } from 'src/bootstrap/state.js';
+import { getTelegramInteractionSessionId, isTelegramRemoteEnabled } from 'src/services/telegram/config.js';
+import { canRenderTelegramAskUserQuestion } from 'src/services/telegram/questionSession.js';
 import { MessageResponse } from 'src/components/MessageResponse.js';
 import { BLACK_CIRCLE } from 'src/constants/figures.js';
 import { getModeColor } from 'src/utils/permissions/PermissionMode.js';
@@ -133,13 +135,8 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     return '';
   },
   isEnabled() {
-    // When --channels is active the user is likely on Telegram/Discord, not
-    // watching the TUI. The multiple-choice dialog would hang with nobody at
-    // the keyboard. Channel permission relay already skips
-    // requiresUserInteraction() tools (interactiveHandler.ts) so there's
-    // no alternate approval path.
     if ((feature('KAIROS') || feature('KAIROS_CHANNELS')) && getAllowedChannels().length > 0) {
-      return false;
+      return isTelegramRemoteEnabled() && !!getTelegramInteractionSessionId();
     }
     return true;
   },
@@ -158,6 +155,15 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
   async validateInput({
     questions
   }) {
+    if ((feature('KAIROS') || feature('KAIROS_CHANNELS')) && getAllowedChannels().length > 0) {
+      if (!canRenderTelegramAskUserQuestion(questions)) {
+        return {
+          result: false,
+          message: 'Telegram channel mode currently supports only AskUserQuestion selection prompts that fit the standard question schema.',
+          errorCode: 1
+        };
+      }
+    }
     if (getQuestionPreviewFormat() !== 'html') {
       return {
         result: true

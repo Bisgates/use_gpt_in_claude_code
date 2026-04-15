@@ -10,8 +10,10 @@ const mockLogError = vi.fn()
 
 const mockSetTelegramRemoteDebugState = vi.fn()
 const mockSendTelegramInboundQueued = vi.fn()
-
 const mockGetTelegramProxyUrl = vi.fn()
+
+const mockHandleTelegramQuestionCallbackQuery = vi.fn()
+const mockHandleTelegramQuestionTextMessage = vi.fn()
 
 vi.mock('src/services/telegram/config.js', () => ({
   readTelegramConfig: () => mockReadTelegramConfig(),
@@ -26,6 +28,13 @@ vi.mock('src/services/telegram/config.js', () => ({
 vi.mock('src/services/telegram/interactionNotifier.js', () => ({
   sendTelegramInboundQueued: (sessionId: string, text: string) =>
     mockSendTelegramInboundQueued(sessionId, text),
+}))
+
+vi.mock('src/services/telegram/questionSession.js', () => ({
+  handleTelegramQuestionCallbackQuery: (params: unknown) =>
+    mockHandleTelegramQuestionCallbackQuery(params),
+  handleTelegramQuestionTextMessage: (params: unknown) =>
+    mockHandleTelegramQuestionTextMessage(params),
 }))
 
 vi.mock('src/utils/messageQueueManager.js', () => ({
@@ -53,6 +62,8 @@ describe('telegram/remote', () => {
     mockIsTelegramRemoteEnabled.mockReturnValue(true)
     mockGetTelegramInteractionSessionId.mockReturnValue('session-1')
     mockGetTelegramProxyUrl.mockReturnValue(undefined)
+    mockHandleTelegramQuestionCallbackQuery.mockResolvedValue(false)
+    mockHandleTelegramQuestionTextMessage.mockResolvedValue(false)
   })
 
   afterEach(() => {
@@ -118,6 +129,82 @@ describe('telegram/remote', () => {
     await vi.advanceTimersByTimeAsync(5)
     expect(mockFetch).not.toHaveBeenCalled()
     expect(mockEnqueue).not.toHaveBeenCalled()
+
+    handle.stop()
+  })
+
+  it('routes Telegram callback queries to the ask-user-question session handler', async () => {
+    mockHandleTelegramQuestionCallbackQuery.mockResolvedValue(true)
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        result: [
+          {
+            update_id: 78,
+            callback_query: {
+              id: 'cb-1',
+              data: 'aq:prompt-1:submit',
+              message: { message_id: 7, chat: { id: '12345' } },
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { startTelegramRemotePolling } = await import(
+      'src/services/telegram/remote.js'
+    )
+    const handle = startTelegramRemotePolling('session-1')
+
+    await vi.runOnlyPendingTimersAsync()
+    await Promise.resolve()
+
+    expect(mockHandleTelegramQuestionCallbackQuery).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      callbackQueryId: 'cb-1',
+      data: 'aq:prompt-1:submit',
+    })
+    expect(mockEnqueue).not.toHaveBeenCalled()
+
+    handle.stop()
+  })
+
+  it('does not enqueue text consumed by the ask-user-question session input handler', async () => {
+    mockHandleTelegramQuestionTextMessage.mockResolvedValue(true)
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        ok: true,
+        result: [
+          {
+            update_id: 79,
+            message: {
+              message_id: 2,
+              text: 'note from telegram',
+              chat: { id: '12345' },
+            },
+          },
+        ],
+      }),
+    })
+    vi.stubGlobal('fetch', mockFetch)
+
+    const { startTelegramRemotePolling } = await import(
+      'src/services/telegram/remote.js'
+    )
+    const handle = startTelegramRemotePolling('session-1')
+
+    await vi.runOnlyPendingTimersAsync()
+    await Promise.resolve()
+
+    expect(mockHandleTelegramQuestionTextMessage).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      text: 'note from telegram',
+    })
+    expect(mockEnqueue).not.toHaveBeenCalled()
+    expect(mockSendTelegramInboundQueued).not.toHaveBeenCalled()
 
     handle.stop()
   })

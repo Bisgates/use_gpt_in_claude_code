@@ -30,6 +30,7 @@ import { shouldSendTelegramNotifications } from '../services/telegram/config.js'
 import { sendTelegramMessage } from '../services/telegram/sender.js';
 import { sendTelegramTurnComplete, sendTelegramWaitState, shouldSendTelegramInteractionUpdates } from '../services/telegram/interactionNotifier.js';
 import { startTelegramRemotePolling } from '../services/telegram/remote.js';
+import { startTelegramAskUserQuestionSession } from '../services/telegram/questionSession.js';
 import { getLastInteractionTime, getSessionId } from '../bootstrap/state.js';
 import { startPreventSleep, stopPreventSleep } from '../services/preventSleep.js';
 import { useTerminalNotification } from '../ink/useTerminalNotification.js';
@@ -1114,6 +1115,21 @@ export function REPL({
     setToolJSXInternal(args);
   }, []);
   const [toolUseConfirmQueue, setToolUseConfirmQueue] = useState<ToolUseConfirm[]>([]);
+  const telegramPermissionQueueInterceptor = useCallback(async (item: ToolUseConfirm) => {
+    if (!shouldSendTelegramInteractionUpdates(sessionId)) {
+      return false;
+    }
+    if (item.tool.name !== 'AskUserQuestion') {
+      return false;
+    }
+    return startTelegramAskUserQuestionSession({
+      sessionId,
+      toolUseConfirm: item,
+      onDone: () => {
+        setToolUseConfirmQueue(queue => queue.filter(q => q.toolUseID !== item.toolUseID));
+      }
+    });
+  }, [sessionId]);
   // Sticky footer JSX registered by permission request components (currently
   // only ExitPlanModePermissionRequest). Renders in FullscreenLayout's `bottom`
   // slot so response options stay visible while the user scrolls a long plan.
@@ -2488,7 +2504,7 @@ export function REPL({
     registerLeaderSetToolPermissionContext(setToolPermissionContext);
     return () => unregisterLeaderSetToolPermissionContext();
   }, [setToolPermissionContext]);
-  const canUseTool = useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext);
+  const canUseTool = useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext, telegramPermissionQueueInterceptor);
   const requestPrompt = useCallback((title: string, toolInputSummary?: string | null) => (request: PromptRequest): Promise<PromptResponse> => new Promise<PromptResponse>((resolve, reject) => {
     setPromptQueue(prev => [...prev, {
       request,

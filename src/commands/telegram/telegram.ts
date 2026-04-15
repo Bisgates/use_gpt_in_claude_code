@@ -58,8 +58,10 @@ export const call: LocalCommandCall = async (args) => {
       return remoteOn()
     case 'remote-off':
       return remoteOff()
+    case 'inter':
+      return inter(parts.slice(1))
     case 'interaction':
-      return interaction(parts.slice(1))
+      return inter(parts.slice(1))
     case 'proxy':
       return proxy(parts.slice(1))
     default:
@@ -67,7 +69,7 @@ export const call: LocalCommandCall = async (args) => {
         type: 'text',
         value:
           `Unknown subcommand: ${sub}\n` +
-          'Usage: /telegram setup | show | save <token> <chat_id> | clear | enable | disable | enable-global | disable-global | test | remote-on | remote-off | interaction | interaction clear | proxy <url> | proxy clear',
+          'Usage: /telegram setup | show | save <token> <chat_id> | clear | enable | disable | enable-global | disable-global | test | remote-on | remote-off | inter | inter clear | interaction | interaction clear | proxy <url> | proxy clear',
       }
   }
 }
@@ -315,7 +317,7 @@ function proxy(args: string[]): { type: 'text'; value: string } {
   }
 }
 
-function interaction(args: string[]): { type: 'text'; value: string } {
+function inter(args: string[]): { type: 'text'; value: string } {
   const config = readTelegramConfig()
   if (!config || !config.botToken || !config.chatId) {
     return {
@@ -340,7 +342,7 @@ function interaction(args: string[]): { type: 'text'; value: string } {
   if (args.length > 0) {
     return {
       type: 'text',
-      value: 'Usage: /telegram interaction | /telegram interaction clear',
+      value: 'Usage: /telegram inter | /telegram inter clear',
     }
   }
 

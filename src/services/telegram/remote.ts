@@ -6,6 +6,10 @@ import {
   sendTelegramInboundQueued,
 } from './interactionNotifier.js'
 import {
+  handleTelegramQuestionCallbackQuery,
+  handleTelegramQuestionTextMessage,
+} from './questionSession.js'
+import {
   getTelegramInteractionSessionId,
   getTelegramLastUpdateId,
   isTelegramRemoteEnabled,
@@ -24,6 +28,14 @@ type TelegramUpdate = {
     message_id: number
     text?: string
     chat?: { id?: number | string }
+  }
+  callback_query?: {
+    id: string
+    data?: string
+    message?: {
+      message_id: number
+      chat?: { id?: number | string }
+    }
   }
 }
 
@@ -90,7 +102,7 @@ async function fetchTelegramUpdates(signal: AbortSignal): Promise<TelegramUpdate
   const url = `${TELEGRAM_API}/bot${config.botToken}/getUpdates`
   const body: Record<string, unknown> = {
     timeout: POLL_TIMEOUT_SECONDS,
-    allowed_updates: ['message'],
+    allowed_updates: ['message', 'callback_query'],
   }
   if (offset !== undefined) {
     body.offset = offset + 1
@@ -169,6 +181,34 @@ export function startTelegramRemotePolling(sessionId: string): TelegramRemoteHan
         })
         for (const update of updates) {
           setTelegramLastUpdateId(update.update_id)
+
+          const callbackId = update.callback_query?.id
+          const callbackData = update.callback_query?.data?.trim()
+          const callbackChatId = update.callback_query?.message?.chat?.id
+          if (callbackId && callbackData) {
+            if (String(callbackChatId) !== String(config.chatId)) {
+              updateDebugState({
+                lastIgnoredAt: nowIso(),
+                lastIgnoredReason: `callback_chat_id_mismatch:${String(callbackChatId)}`,
+              })
+              continue
+            }
+
+            const consumed = await handleTelegramQuestionCallbackQuery({
+              sessionId,
+              callbackQueryId: callbackId,
+              data: callbackData,
+            })
+            if (consumed) {
+              updateDebugState({
+                status: 'queued',
+                lastInboundAt: nowIso(),
+                lastInboundText: callbackData.slice(0, 120),
+              })
+              continue
+            }
+          }
+
           const text = update.message?.text?.trim()
           const chatId = update.message?.chat?.id
           if (!text) {
@@ -182,6 +222,19 @@ export function startTelegramRemotePolling(sessionId: string): TelegramRemoteHan
             updateDebugState({
               lastIgnoredAt: nowIso(),
               lastIgnoredReason: `chat_id_mismatch:${String(chatId)}`,
+            })
+            continue
+          }
+
+          const handledByQuestionSession = await handleTelegramQuestionTextMessage({
+            sessionId,
+            text,
+          })
+          if (handledByQuestionSession) {
+            updateDebugState({
+              status: 'queued',
+              lastInboundAt: nowIso(),
+              lastInboundText: text.slice(0, 120),
             })
             continue
           }
