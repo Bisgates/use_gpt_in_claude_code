@@ -18,6 +18,70 @@ import type { OpenAIErrorPayload } from './openaiResponsesTypes.js'
 const MISSING_OPENAI_API_KEY_MESSAGE =
   'OPENAI_API_KEY is not configured. Expected ~/.codex/auth.json or OPENAI_API_KEY.'
 
+function parseRetryAfterMs(
+  headers: Headers,
+): number | null {
+  const retryAfterMs = headers.get('retry-after-ms')
+  if (retryAfterMs) {
+    const parsed = Number.parseInt(retryAfterMs, 10)
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed
+    }
+  }
+
+  const retryAfter = headers.get('retry-after')
+  if (!retryAfter) {
+    return null
+  }
+
+  const seconds = Number.parseFloat(retryAfter)
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.round(seconds * 1000)
+  }
+
+  const retryAt = Date.parse(retryAfter)
+  if (Number.isNaN(retryAt)) {
+    return null
+  }
+
+  return Math.max(0, retryAt - Date.now())
+}
+
+function extractOpenAIRequestId(headers: Headers): string | undefined {
+  return (
+    headers.get('x-request-id') ??
+    headers.get('request-id') ??
+    headers.get('openai-request-id') ??
+    undefined
+  )
+}
+
+export class OpenAIHTTPError extends Error {
+  readonly status: number
+  readonly bodyText: string
+  readonly headers: Headers
+  readonly requestId: string | undefined
+  readonly retryAfterMs: number | null
+
+  constructor({
+    status,
+    bodyText,
+    headers,
+  }: {
+    status: number
+    bodyText: string
+    headers: Headers
+  }) {
+    super(normalizeOpenAIErrorMessage(bodyText, status))
+    this.name = 'OpenAIHTTPError'
+    this.status = status
+    this.bodyText = bodyText
+    this.headers = headers
+    this.requestId = extractOpenAIRequestId(headers)
+    this.retryAfterMs = parseRetryAfterMs(headers)
+  }
+}
+
 function appendProviderQueryParams(url: URL): URL {
   const queryParams = resolveOpenAIProviderQueryParams()
   if (!queryParams) {
@@ -148,7 +212,11 @@ export async function fetchOpenAIResponse(
 
   if (!response.ok) {
     const payloadText = await response.text()
-    throw new Error(normalizeOpenAIErrorMessage(payloadText, response.status))
+    throw new OpenAIHTTPError({
+      status: response.status,
+      bodyText: payloadText,
+      headers: new Headers(response.headers),
+    })
   }
 
   return response

@@ -135,9 +135,6 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
     return '';
   },
   isEnabled() {
-    if ((feature('KAIROS') || feature('KAIROS_CHANNELS')) && getAllowedChannels().length > 0) {
-      return isTelegramRemoteEnabled() && !!getTelegramInteractionSessionId();
-    }
     return true;
   },
   isConcurrencySafe() {
@@ -155,15 +152,6 @@ export const AskUserQuestionTool: Tool<InputSchema, Output> = buildTool({
   async validateInput({
     questions
   }) {
-    if ((feature('KAIROS') || feature('KAIROS_CHANNELS')) && getAllowedChannels().length > 0) {
-      if (!canRenderTelegramAskUserQuestion(questions)) {
-        return {
-          result: false,
-          message: 'Telegram channel mode currently supports only AskUserQuestion selection prompts that fit the standard question schema.',
-          errorCode: 1
-        };
-      }
-    }
     if (getQuestionPreviewFormat() !== 'html') {
       return {
         result: true

@@ -163,8 +163,16 @@ function* yieldMissingToolResultBlocks(
  * rules, ye will be punished with an entire day of debugging and hair pulling.
  */
 const MAX_OUTPUT_TOKENS_RECOVERY_LIMIT = 3
-const RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT = 30
-const RECOVERABLE_INTERRUPTION_RETRY_DELAY_MS = 10_000
+const RECOVERABLE_INTERRUPTION_AUTO_CONTINUE_DELAYS_MS = [0, 1000, 3000]
+
+function getRecoverableInterruptionRetryDelayMs(attempt: number): number {
+  return RECOVERABLE_INTERRUPTION_AUTO_CONTINUE_DELAYS_MS[
+    Math.min(
+      Math.max(0, attempt - 1),
+      RECOVERABLE_INTERRUPTION_AUTO_CONTINUE_DELAYS_MS.length - 1,
+    )
+  ]!
+}
 
 /**
  * Is this a max_output_tokens error message? If so, the streaming loop should
@@ -204,6 +212,14 @@ function isRecoverableInterruptionMessage(
     text.includes('stream disconnected') ||
     text.includes('connection reset') ||
     text.includes('stream ended before completion') ||
+    text.includes('disconnected mid-event') ||
+    text.includes('truncated stream event') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('processing your request') ||
+    text.includes('internal server error') ||
+    text.includes('bad gateway') ||
+    text.includes('gateway timeout') ||
+    text.includes('service unavailable') ||
     text.includes('timeout')
   )
 }
@@ -1298,8 +1314,9 @@ async function* queryLoop(
       if (isRecoverableInterruptionMessage(lastMessage)) {
         if (
           recoverableInterruptionRecoveryCount <
-          RECOVERABLE_INTERRUPTION_RECOVERY_LIMIT
+          RECOVERABLE_INTERRUPTION_AUTO_CONTINUE_DELAYS_MS.length
         ) {
+          const attempt = recoverableInterruptionRecoveryCount + 1
           const interruptionDetail =
             lastMessage.message.content
               .filter(
@@ -1310,10 +1327,13 @@ async function* queryLoop(
               .map(content => content.text)
               .join(' ') || 'transient error'
 
-          await sleep(
-            RECOVERABLE_INTERRUPTION_RETRY_DELAY_MS,
-            toolUseContext.abortController.signal,
-          )
+          const retryDelayMs = getRecoverableInterruptionRetryDelayMs(attempt)
+          if (retryDelayMs > 0) {
+            await sleep(
+              retryDelayMs,
+              toolUseContext.abortController.signal,
+            )
+          }
 
           if (toolUseContext.abortController.signal.aborted) {
             return { reason: 'completed' }
@@ -1337,8 +1357,7 @@ async function* queryLoop(
             toolUseContext,
             autoCompactTracking: tracking,
             maxOutputTokensRecoveryCount: 0,
-            recoverableInterruptionRecoveryCount:
-              recoverableInterruptionRecoveryCount + 1,
+            recoverableInterruptionRecoveryCount: attempt,
             hasAttemptedReactiveCompact,
             maxOutputTokensOverride: undefined,
             pendingToolUseSummary: undefined,

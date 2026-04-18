@@ -2,6 +2,37 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const fetchOpenAIResponseMock = vi.hoisted(() => vi.fn())
 const resolveAppliedEffortMock = vi.hoisted(() => vi.fn(() => undefined))
+const OpenAIHTTPErrorMock = vi.hoisted(
+  () =>
+    class OpenAIHTTPError extends Error {
+      readonly status: number
+      readonly bodyText: string
+      readonly headers: Headers
+      readonly requestId: string | undefined
+      readonly retryAfterMs: number | null
+
+      constructor({
+        status,
+        bodyText,
+        headers,
+      }: {
+        status: number
+        bodyText: string
+        headers?: Headers
+      }) {
+        super(bodyText)
+        this.name = 'OpenAIHTTPError'
+        this.status = status
+        this.bodyText = bodyText
+        this.headers = headers ?? new Headers()
+        this.requestId =
+          this.headers.get('x-request-id') ??
+          this.headers.get('request-id') ??
+          undefined
+        this.retryAfterMs = null
+      }
+    },
+)
 
 vi.mock('../../../src/bootstrap/state.js', () => ({
   getSessionId: () => 'session-123',
@@ -74,6 +105,7 @@ vi.mock('../../../src/services/modelBackend/openaiCodexConfig.js', () => ({
 }))
 vi.mock('../../../src/services/modelBackend/openaiApi.js', () => ({
   fetchOpenAIResponse: (...args: unknown[]) => fetchOpenAIResponseMock(...args),
+  OpenAIHTTPError: OpenAIHTTPErrorMock,
 }))
 
 import { runOpenAIResponses } from '../../../src/services/modelBackend/openaiResponsesBackend.ts'
@@ -117,6 +149,95 @@ beforeEach(() => {
 })
 
 describe('openaiResponsesBackend fork contracts', () => {
+  it('[P0:model] converts a truncated SSE event into a recoverable interruption style API error', async () => {
+    fetchOpenAIResponseMock.mockResolvedValue(
+      makeRawSseResponse([
+        'event: response.created\n',
+        'data: {"type":"response.created"}\n\n',
+        'event: response.output_item.added\n',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"message","content":[{"type":"output_text","text":"unterminated',
+      ]),
+    )
+
+    const outputs = await collect(
+      runOpenAIResponses({
+        messages: [{ type: 'user', message: { content: 'hi' } }],
+        systemPrompt: ['system'],
+        tools: [],
+        options: { model: 'sonnet' },
+        signal: new AbortController().signal,
+      } as any),
+    )
+
+    expect(outputs.at(-1)).toMatchObject({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      message: {
+        content: [
+          {
+            type: 'text',
+            text: 'OpenAI Responses stream disconnected mid-event',
+          },
+        ],
+      },
+      error: 'unknown',
+    })
+  })
+
+  it('[P0:model] silently retries a recoverable OpenAI HTTP error before any stream output has been emitted', async () => {
+    fetchOpenAIResponseMock
+      .mockRejectedValueOnce(
+        new OpenAIHTTPErrorMock({
+          status: 500,
+          bodyText:
+            'An error occurred while processing your request. Please retry. Please include request ID req_123 in your message.',
+          headers: new Headers({ 'x-request-id': 'req_123' }),
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeSseResponse([
+          { type: 'response.created', response: { id: 'resp-retry-1' } },
+          {
+            type: 'response.completed',
+            response: {
+              id: 'resp-retry-1',
+              output: [
+                {
+                  type: 'message',
+                  role: 'assistant',
+                  content: [{ type: 'output_text', text: 'recovered after retry' }],
+                },
+              ],
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+              },
+            },
+          },
+        ]),
+      )
+
+    const outputs = await collect(
+      runOpenAIResponses({
+        messages: [{ type: 'user', message: { content: 'hi' } }],
+        systemPrompt: ['system'],
+        tools: [],
+        options: { model: 'sonnet' },
+        signal: new AbortController().signal,
+      } as any),
+    )
+
+    expect(fetchOpenAIResponseMock).toHaveBeenCalledTimes(2)
+    expect(outputs.at(-1)).toMatchObject({
+      type: 'assistant',
+      requestId: 'resp-retry-1',
+      message: {
+        content: [{ type: 'text', text: 'recovered after retry' }],
+      },
+    })
+    expect(outputs.some(output => output?.isApiErrorMessage)).toBe(false)
+  })
+
   it('[P0:model] serializes structured tool_result content into function_call_output payloads without dropping observable text', async () => {
     fetchOpenAIResponseMock.mockResolvedValue(
       makeSseResponse([
@@ -2817,7 +2938,7 @@ describe('openaiResponsesBackend fork contracts', () => {
       } as any),
     )
 
-    expect(outputs).toEqual([
+    expect(outputs).toMatchObject([
       {
         type: 'stream_event',
         event: {
@@ -2847,7 +2968,7 @@ describe('openaiResponsesBackend fork contracts', () => {
     ])
   })
 
-  it('[P0:model] reports a stable assistant API error when the SSE stream ends without a completed payload', async () => {
+  it('[P0:model] recovers a final assistant message from streamed text when the SSE stream ends before response.completed arrives', async () => {
     fetchOpenAIResponseMock.mockResolvedValue(
       makeSseResponse([
         { type: 'response.created' },
@@ -2875,7 +2996,7 @@ describe('openaiResponsesBackend fork contracts', () => {
       } as any),
     )
 
-    expect(outputs).toEqual([
+    expect(outputs).toMatchObject([
       {
         type: 'stream_event',
         event: {
@@ -2900,19 +3021,15 @@ describe('openaiResponsesBackend fork contracts', () => {
         },
       },
       {
+        type: 'stream_event',
+        event: { type: 'message_stop' },
+      },
+      {
         type: 'assistant',
-        isApiErrorMessage: true,
+        requestId: 'openai-responses-recovered',
         message: {
-          role: 'assistant',
-          model: 'uninitialized',
-          usage: { input_tokens: 0, output_tokens: 0 },
-          content: [
-            {
-              type: 'text',
-              text:
-                'OpenAI Responses stream finished without a completed response payload.',
-            },
-          ],
+          model: 'gpt-5.2',
+          content: [{ type: 'text', text: 'partial output' }],
         },
       },
     ])

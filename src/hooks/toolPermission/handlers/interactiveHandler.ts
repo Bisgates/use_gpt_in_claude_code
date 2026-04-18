@@ -168,6 +168,7 @@ function handleInteractivePermission(
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
       channelUnsubscribe?.()
+      ctx.removeFromQueue()
 
       resolveOnce(
         await ctx.handleUserAllow(
@@ -191,6 +192,7 @@ function handleInteractivePermission(
         bridgeCallbacks.cancelRequest(bridgeRequestId)
       }
       channelUnsubscribe?.()
+      ctx.removeFromQueue()
 
       ctx.logDecision(
         {

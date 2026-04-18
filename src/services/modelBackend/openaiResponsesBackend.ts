@@ -18,7 +18,7 @@ import {
   resolveOpenAIPromptCacheRetention,
   shouldStoreOpenAIResponses,
 } from './openaiCodexConfig.js'
-import { fetchOpenAIResponse } from './openaiApi.js'
+import { fetchOpenAIResponse, OpenAIHTTPError } from './openaiApi.js'
 import {
   buildOpenAICustomToolCallStreamText,
   buildOpenAIContentPartKey,
@@ -39,6 +39,7 @@ import type {
   OpenAIResponseOutputItem,
   OpenAIResponsesStreamEvent,
 } from './openaiResponsesTypes.js'
+import { sleep } from '../../utils/sleep.js'
 
 type OpenAIInputItem =
   | {
@@ -467,6 +468,112 @@ function mergeStreamedCompletedOutputItems(
   }
 }
 
+function appendStreamText(
+  buffer: Map<number, string>,
+  index: number,
+  text: string,
+): void {
+  if (!text) {
+    return
+  }
+
+  buffer.set(index, `${buffer.get(index) ?? ''}${text}`)
+}
+
+function synthesizeResponseFromStream({
+  responseId,
+  streamedCompletedOutputItems,
+  streamedTextContent,
+  streamedReasoningContent,
+  streamedFunctionCalls,
+  streamedFunctionArguments,
+  streamedNativeItems,
+}: {
+  responseId: string | undefined
+  streamedCompletedOutputItems: Map<number, OpenAIResponseOutputItem>
+  streamedTextContent: Map<number, string>
+  streamedReasoningContent: Map<number, string>
+  streamedFunctionCalls: Map<number, OpenAIResponseFunctionCall>
+  streamedFunctionArguments: Map<number, string>
+  streamedNativeItems: Map<
+    number,
+    OpenAIResponseBuiltinToolItem | OpenAIResponseCustomToolCall
+  >
+}): OpenAIResponse | undefined {
+  const indexes = new Set<number>([
+    ...streamedCompletedOutputItems.keys(),
+    ...streamedTextContent.keys(),
+    ...streamedReasoningContent.keys(),
+    ...streamedFunctionCalls.keys(),
+    ...streamedFunctionArguments.keys(),
+    ...streamedNativeItems.keys(),
+  ])
+
+  if (indexes.size === 0) {
+    return undefined
+  }
+
+  const output = [...indexes]
+    .sort((left, right) => left - right)
+    .map(index => {
+      const completedItem = streamedCompletedOutputItems.get(index)
+      if (completedItem && hasRenderableAssistantContent(completedItem)) {
+        return completedItem
+      }
+
+      const text = streamedTextContent.get(index)?.trim()
+      if (text) {
+        return {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text }],
+        } satisfies OpenAIResponseOutputItem
+      }
+
+      const thinking = streamedReasoningContent.get(index)?.trim()
+      if (thinking) {
+        return {
+          type: 'reasoning',
+          content: [{ type: 'reasoning_text', text: thinking }],
+        } satisfies OpenAIResponseOutputItem
+      }
+
+      const functionCall = streamedFunctionCalls.get(index)
+      if (functionCall?.call_id && functionCall.name) {
+        return {
+          ...functionCall,
+          arguments:
+            streamedFunctionArguments.get(index) ?? functionCall.arguments ?? '',
+        } satisfies OpenAIResponseOutputItem
+      }
+
+      const streamedNativeItem = streamedNativeItems.get(index)
+      if (streamedNativeItem && hasRenderableAssistantContent(streamedNativeItem)) {
+        return streamedNativeItem
+      }
+
+      return completedItem ?? streamedNativeItem
+    })
+    .filter((item): item is OpenAIResponseOutputItem => item !== undefined)
+
+  if (output.length === 0) {
+    return undefined
+  }
+
+  const fallbackId =
+    responseId ??
+    output.find(
+      (item): item is OpenAIResponseOutputItem & { id: string } =>
+        typeof item.id === 'string' && item.id.trim().length > 0,
+    )?.id ??
+    'openai-responses-recovered'
+
+  return {
+    id: fallbackId,
+    output,
+  }
+}
+
 async function createResponsesRequest(params: StreamTurnParams): Promise<{
   url: string
   request: Record<string, unknown>
@@ -694,9 +801,95 @@ function isRecoverableOpenAIResponsesErrorMessage(message: string): boolean {
     normalized.includes('stream disconnected') ||
     normalized.includes('connection reset') ||
     normalized.includes('stream ended before completion') ||
+    normalized.includes('temporarily unavailable') ||
+    normalized.includes('processing your request') ||
+    normalized.includes('internal server error') ||
+    normalized.includes('bad gateway') ||
+    normalized.includes('gateway timeout') ||
+    normalized.includes('service unavailable') ||
     normalized.includes('timeout')
   )
 }
+
+function isRecoverableOpenAIResponsesHttpError(error: OpenAIHTTPError): boolean {
+  return (
+    error.status === 408 ||
+    error.status === 409 ||
+    error.status === 429 ||
+    error.status >= 500 ||
+    isRecoverableOpenAIResponsesErrorMessage(error.message)
+  )
+}
+
+const OPENAI_RESPONSES_REQUEST_RETRY_DELAYS_MS = [250, 1000]
+
+function shouldRetryOpenAIResponsesRequest(
+  error: unknown,
+  attemptIndex: number,
+  emittedVisibleOutput: boolean,
+): boolean {
+  if (emittedVisibleOutput) {
+    return false
+  }
+
+  if (attemptIndex >= OPENAI_RESPONSES_REQUEST_RETRY_DELAYS_MS.length) {
+    return false
+  }
+
+  if (error instanceof OpenAIHTTPError) {
+    return isRecoverableOpenAIResponsesHttpError(error)
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+  return isRecoverableOpenAIResponsesErrorMessage(message)
+}
+
+function getRecoverableOpenAIResponsesRetryDelayMs(
+  error: unknown,
+  attemptIndex: number,
+): number {
+  if (error instanceof OpenAIHTTPError && error.retryAfterMs !== null) {
+    return Math.max(0, error.retryAfterMs)
+  }
+
+  return OPENAI_RESPONSES_REQUEST_RETRY_DELAYS_MS[
+    Math.min(attemptIndex, OPENAI_RESPONSES_REQUEST_RETRY_DELAYS_MS.length - 1)
+  ]!
+}
+
+function formatOpenAIResponsesError(
+  error: unknown,
+): {
+  content: string
+  errorDetails?: string
+  recoverable: boolean
+} {
+  if (error instanceof OpenAIHTTPError) {
+    const recoverable = isRecoverableOpenAIResponsesHttpError(error)
+    const requestIdSuffix = error.requestId ? ` (request ${error.requestId})` : ''
+    const content =
+      recoverable && !isRecoverableOpenAIResponsesErrorMessage(error.message)
+        ? `OpenAI Responses temporarily unavailable${requestIdSuffix}: ${error.message}`
+        : error.message
+
+    return {
+      content,
+      recoverable,
+      errorDetails: `status=${error.status}${error.requestId ? ` request_id=${error.requestId}` : ''}`,
+    }
+  }
+
+  const content =
+    error instanceof Error ? error.message : 'OpenAI Responses request failed'
+
+  return {
+    content,
+    recoverable: isRecoverableOpenAIResponsesErrorMessage(content),
+  }
+}
+
+const OPENAI_RESPONSES_TRUNCATED_STREAM_ERROR =
+  'OpenAI Responses stream disconnected mid-event'
 
 function parseSseChunk(chunk: string): OpenAIResponsesStreamEvent | null {
   const lines = chunk
@@ -724,11 +917,18 @@ function parseSseChunk(chunk: string): OpenAIResponsesStreamEvent | null {
     return null
   }
 
-  const parsed = JSON.parse(data) as { type?: string }
-  if (!parsed.type && eventName) {
-    parsed.type = eventName
+  try {
+    const parsed = JSON.parse(data) as { type?: string }
+    if (!parsed.type && eventName) {
+      parsed.type = eventName
+    }
+    return parsed as OpenAIResponsesStreamEvent
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error(OPENAI_RESPONSES_TRUNCATED_STREAM_ERROR)
+    }
+    throw error
   }
-  return parsed as OpenAIResponsesStreamEvent
 }
 
 export async function* parseResponsesStream(
@@ -792,495 +992,575 @@ async function streamResponse(
 export async function* runOpenAIResponses(
   params: StreamTurnParams,
 ): ModelBackendStream {
-  try {
-    const { url, request, model } = await createResponsesRequest(params)
-    const streamedResponse = await streamResponse(url, request, params.signal)
-    const outputIndexes = new Map<string, number>()
-    const outputItemTypes = new Map<number, string>()
-    // Preserve display-only native items across stream events so we can emit
-    // low-noise progress summaries without changing who actually executes tools.
-    const streamedNativeItems = new Map<
-      number,
-      OpenAIResponseBuiltinToolItem | OpenAIResponseCustomToolCall
-    >()
-    const streamedAnnotations = new Map<string, OpenAIResponseAnnotation[]>()
-    const startedTextBlockIndexes = new Set<number>()
-    const startedThinkingBlockIndexes = new Set<number>()
-    const openToolUseBlockIndexes = new Set<number>()
-    const streamedCompletedOutputItems = new Map<number, OpenAIResponseOutputItem>()
-    const customToolInputStreamedIndexes = new Set<number>()
-    const audioTranscriptStreamedParts = new Set<string>()
-    const reasoningSummaryPartCounts = new Map<number, number>()
-    const reasoningSummarySeenIndexes = new Set<number>()
-    let startedAssistantMessage = false
-    let completedResponse: OpenAIResponse | undefined
+  const { url, request, model } = await createResponsesRequest(params)
 
-    for await (const event of parseResponsesStream(streamedResponse)) {
-      switch (event.type) {
-        case 'response.created': {
-          if (!startedAssistantMessage) {
-            startedAssistantMessage = true
-            yield createMessageStartStreamEvent()
-          }
-          break
-        }
-        case 'response.output_item.added': {
-          if (!startedAssistantMessage) {
-            startedAssistantMessage = true
-            yield createMessageStartStreamEvent()
-          }
+  for (let attemptIndex = 0; ; attemptIndex++) {
+    let emittedVisibleOutput = false
+    const emit = <T>(value: T): T => {
+      emittedVisibleOutput = true
+      return value
+    }
 
-          const index = event.output_index ?? 0
-          if (event.item_id) {
-            outputIndexes.set(event.item_id, index)
-          }
-          if (event.item?.id) {
-            outputIndexes.set(event.item.id, index)
-          }
-          if (event.item?.type) {
-            outputItemTypes.set(index, event.item.type)
-          }
+    try {
+      const streamedResponse = await streamResponse(url, request, params.signal)
+      const outputIndexes = new Map<string, number>()
+      const outputItemTypes = new Map<number, string>()
+      const streamedNativeItems = new Map<
+        number,
+        OpenAIResponseBuiltinToolItem | OpenAIResponseCustomToolCall
+      >()
+      const streamedAnnotations = new Map<string, OpenAIResponseAnnotation[]>()
+      const startedTextBlockIndexes = new Set<number>()
+      const startedThinkingBlockIndexes = new Set<number>()
+      const openToolUseBlockIndexes = new Set<number>()
+      const streamedCompletedOutputItems = new Map<number, OpenAIResponseOutputItem>()
+      const streamedTextContent = new Map<number, string>()
+      const streamedReasoningContent = new Map<number, string>()
+      const streamedFunctionCalls = new Map<number, OpenAIResponseFunctionCall>()
+      const streamedFunctionArguments = new Map<number, string>()
+      const customToolInputStreamedIndexes = new Set<number>()
+      const audioTranscriptStreamedParts = new Set<string>()
+      const reasoningSummaryPartCounts = new Map<number, number>()
+      const reasoningSummarySeenIndexes = new Set<number>()
+      let startedAssistantMessage = false
+      let completedResponse: OpenAIResponse | undefined
+      let responseIdFromStream: string | undefined
 
-          if (event.item?.type === 'function_call') {
-            const functionCall = event.item as OpenAIResponseFunctionCall
-            openToolUseBlockIndexes.add(index)
-            yield createToolUseStartStreamEvent(index, functionCall)
-          } else if (
-            event.item?.type &&
-            isOpenAIDisplayOnlyNativeItemType(event.item.type)
-          ) {
-            streamedNativeItems.set(
-              index,
-              event.item as
-                | OpenAIResponseBuiltinToolItem
-                | OpenAIResponseCustomToolCall,
-            )
-          } else if (
-            event.item?.type &&
-            event.item.type !== 'message' &&
-            event.item.type !== 'reasoning' &&
-            event.item.type !== 'function_call'
-          ) {
-            maybeLogResponsesDegradation(
-              'unsupported output item',
-              event.item.type,
-              'streamed item is not mapped onto the local Claude-style runtime',
-            )
-          }
-          break
-        }
-        case 'response.content_part.added': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          const partType = event.part?.type
-          if (
-            (partType === 'output_text' || partType === 'refusal') &&
-            !startedTextBlockIndexes.has(index)
-          ) {
-            startedTextBlockIndexes.add(index)
-            yield createTextBlockStartStreamEvent(index)
-          } else if (
-            partType &&
-            outputItemTypes.get(index) === 'message' &&
-            partType !== 'output_text' &&
-            partType !== 'output_audio' &&
-            partType !== 'refusal'
-          ) {
-            maybeLogResponsesDegradation(
-              'unsupported message content part',
-              partType,
-              'streamed content part is not projected into Claude-style text blocks',
-            )
-          }
-          break
-        }
-        case 'response.output_text.delta': {
-          const text = event.delta || ''
-          if (!text) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (!startedTextBlockIndexes.has(index)) {
-            startedTextBlockIndexes.add(index)
-            yield createTextBlockStartStreamEvent(index)
-          }
-          yield createTextDeltaStreamEvent(index, text)
-          break
-        }
-        case 'response.output_text.done': {
-          break
-        }
-        case 'response.output_audio.delta':
-        case 'response.output_audio.done': {
-          // The local Claude-style runtime has no native audio output block.
-          // Preserve the transcript via output_audio_transcript events instead.
-          break
-        }
-        case 'response.output_audio_transcript.delta': {
-          const text = event.delta || ''
-          if (!text) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          audioTranscriptStreamedParts.add(
-            getStreamContentPartKey(event, outputIndexes),
-          )
-          if (!startedTextBlockIndexes.has(index)) {
-            startedTextBlockIndexes.add(index)
-            yield createTextBlockStartStreamEvent(index)
-          }
-          yield createTextDeltaStreamEvent(index, text)
-          break
-        }
-        case 'response.output_audio_transcript.done': {
-          const text = event.transcript || ''
-          if (!text) break
-          const key = getStreamContentPartKey(event, outputIndexes)
-          if (audioTranscriptStreamedParts.has(key)) {
-            break
-          }
-
-          audioTranscriptStreamedParts.add(key)
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (!startedTextBlockIndexes.has(index)) {
-            startedTextBlockIndexes.add(index)
-            yield createTextBlockStartStreamEvent(index)
-          }
-          yield createTextDeltaStreamEvent(index, text)
-          break
-        }
-        case 'response.refusal.delta': {
-          const text = event.delta || ''
-          if (!text) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (!startedTextBlockIndexes.has(index)) {
-            startedTextBlockIndexes.add(index)
-            yield createTextBlockStartStreamEvent(index)
-          }
-          yield createTextDeltaStreamEvent(index, text)
-          break
-        }
-        case 'response.refusal.done':
-        case 'response.content_part.done':
-          break
-        case 'response.reasoning_summary_part.added': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          const partCount = reasoningSummaryPartCounts.get(index) ?? 0
-          reasoningSummaryPartCounts.set(index, partCount + 1)
-          reasoningSummarySeenIndexes.add(index)
-
-          if (!startedThinkingBlockIndexes.has(index)) {
-            startedThinkingBlockIndexes.add(index)
-            yield createThinkingBlockStartStreamEvent(index)
-          }
-
-          if (partCount > 0) {
-            yield createThinkingDeltaStreamEvent(index, '\n\n')
-          }
-          break
-        }
-        case 'response.reasoning_summary_part.done':
-          break
-        case 'response.reasoning_summary_text.delta': {
-          const thinking = event.delta || ''
-          if (!thinking) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          reasoningSummarySeenIndexes.add(index)
-          if (!startedThinkingBlockIndexes.has(index)) {
-            startedThinkingBlockIndexes.add(index)
-            yield createThinkingBlockStartStreamEvent(index)
-          }
-          yield createThinkingDeltaStreamEvent(index, thinking)
-          break
-        }
-        case 'response.reasoning_summary_text.done':
-          break
-        case 'response.reasoning_text.delta': {
-          const thinking = event.delta || ''
-          if (!thinking) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (reasoningSummarySeenIndexes.has(index)) {
-            break
-          }
-          if (!startedThinkingBlockIndexes.has(index)) {
-            startedThinkingBlockIndexes.add(index)
-            yield createThinkingBlockStartStreamEvent(index)
-          }
-          yield createThinkingDeltaStreamEvent(index, thinking)
-          break
-        }
-        case 'response.reasoning_text.done':
-          break
-        case 'response.function_call_arguments.delta': {
-          const partialJson = event.delta || ''
-          if (!partialJson) break
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          yield createToolUseDeltaStreamEvent(index, partialJson)
-          break
-        }
-        case 'response.function_call_arguments.done': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (openToolUseBlockIndexes.delete(index)) {
-            yield createBlockStopStreamEvent(index)
-          }
-          break
-        }
-        case 'response.custom_tool_call_input.delta':
-        case 'response.custom_tool_call_input.done': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          const streamedItem = event.item ?? streamedNativeItems.get(index)
-          if (streamedItem) {
-            streamedNativeItems.set(index, streamedItem)
-          }
-
-          if (
-            event.type === 'response.custom_tool_call_input.done' &&
-            customToolInputStreamedIndexes.has(index)
-          ) {
-            break
-          }
-
-          const inputChunk =
-            event.type === 'response.custom_tool_call_input.done'
-              ? event.input || ''
-              : event.delta || ''
-          if (event.type === 'response.custom_tool_call_input.delta' && inputChunk) {
-            customToolInputStreamedIndexes.add(index)
-          }
-          if (!startedTextBlockIndexes.has(index)) {
-            const initialText = streamedItem
-              ? buildOpenAICustomToolCallStreamText(streamedItem, inputChunk)
-              : inputChunk
-            const streamEvents = emitTextStreamEvent(index, initialText)
-            if (streamEvents.length === 0) {
-              break
-            }
-            startedTextBlockIndexes.add(index)
-            for (const streamEvent of streamEvents) {
-              yield streamEvent
+      for await (const event of parseResponsesStream(streamedResponse)) {
+        switch (event.type) {
+          case 'response.created':
+          case 'response.in_progress': {
+            responseIdFromStream = event.response?.id ?? responseIdFromStream
+            if (!startedAssistantMessage) {
+              startedAssistantMessage = true
+              yield emit(createMessageStartStreamEvent())
             }
             break
           }
+          case 'response.output_item.added': {
+            if (!startedAssistantMessage) {
+              startedAssistantMessage = true
+              yield emit(createMessageStartStreamEvent())
+            }
 
-          if (inputChunk) {
-            yield createTextDeltaStreamEvent(index, inputChunk)
-          }
-          break
-        }
-        case 'response.image_generation_call.in_progress':
-        case 'response.image_generation_call.generating':
-        case 'response.image_generation_call.completed': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          const existing = streamedNativeItems.get(index)
-          const status = event.type.slice('response.image_generation_call.'.length)
-          streamedNativeItems.set(index, {
-            ...(existing?.type === 'image_generation_call' ? existing : {}),
-            type: 'image_generation_call',
-            ...(event.item_id ? { id: event.item_id } : {}),
-            status,
-          })
-          break
-        }
-        case 'response.image_generation_call.partial_image': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          const existing = streamedNativeItems.get(index)
-          const previousCount =
-            existing?.type === 'image_generation_call' &&
-            typeof existing.partial_image_count === 'number'
-              ? existing.partial_image_count
-              : 0
-          const partialImageCount =
-            typeof event.partial_image_index === 'number'
-              ? Math.max(previousCount, event.partial_image_index + 1)
-              : previousCount + 1
+            const index = event.output_index ?? 0
+            if (event.item_id) {
+              outputIndexes.set(event.item_id, index)
+            }
+            if (event.item?.id) {
+              outputIndexes.set(event.item.id, index)
+            }
+            if (event.item?.type) {
+              outputItemTypes.set(index, event.item.type)
+            }
 
-          // Track progress only. The event also carries base64 image data,
-          // which we intentionally keep out of Claude-style transcript blocks.
-          streamedNativeItems.set(index, {
-            ...(existing?.type === 'image_generation_call' ? existing : {}),
-            type: 'image_generation_call',
-            ...(event.item_id ? { id: event.item_id } : {}),
-            status: 'generating',
-            partial_image_count: partialImageCount,
-          })
-          break
-        }
-        case 'response.output_text.annotation.added': {
-          if (!event.annotation || !event.item_id) {
+            if (event.item?.type === 'function_call') {
+              const functionCall = event.item as OpenAIResponseFunctionCall
+              streamedFunctionCalls.set(index, functionCall)
+              openToolUseBlockIndexes.add(index)
+              yield emit(createToolUseStartStreamEvent(index, functionCall))
+            } else if (
+              event.item?.type &&
+              isOpenAIDisplayOnlyNativeItemType(event.item.type)
+            ) {
+              streamedNativeItems.set(
+                index,
+                event.item as
+                  | OpenAIResponseBuiltinToolItem
+                  | OpenAIResponseCustomToolCall,
+              )
+            } else if (
+              event.item?.type &&
+              event.item.type !== 'message' &&
+              event.item.type !== 'reasoning' &&
+              event.item.type !== 'function_call'
+            ) {
+              maybeLogResponsesDegradation(
+                'unsupported output item',
+                event.item.type,
+                'streamed item is not mapped onto the local Claude-style runtime',
+              )
+            }
             break
           }
-
-          const key = buildOpenAIContentPartKey(
-            event.item_id,
-            event.content_index ?? 0,
-          )
-          streamedAnnotations.set(key, [
-            ...(streamedAnnotations.get(key) ?? []),
-            event.annotation,
-          ])
-          break
-        }
-        case 'response.output_item.done': {
-          const index = getOutputIndexForStreamEvent(event, outputIndexes)
-          if (event.item) {
-            streamedCompletedOutputItems.set(index, event.item)
-          }
-          if (event.item?.id) {
-            outputIndexes.set(event.item.id, index)
-          }
-          if (event.item?.type) {
-            outputItemTypes.set(index, event.item.type)
-          }
-          const itemType = event.item?.type ?? outputItemTypes.get(index)
-          if (itemType === 'message') {
-            const text =
-              event.item?.type === 'message'
-                ? extractOpenAIResponseMessageText(event.item)
-                : ''
-            if (text) {
-              const streamEvents = startedTextBlockIndexes.has(index)
-                ? [createTextDeltaStreamEvent(index, text)]
-                : emitTextStreamEvent(index, text)
-              if (streamEvents.length > 0) {
-                startedTextBlockIndexes.add(index)
-                for (const streamEvent of streamEvents) {
-                  yield streamEvent
-                }
-              }
-            }
-            if (startedTextBlockIndexes.delete(index)) {
-              yield createBlockStopStreamEvent(index)
-            }
-          } else if (itemType === 'reasoning') {
-            const thinking =
-              event.item?.type === 'reasoning'
-                ? extractOpenAIResponseReasoningText(event.item)
-                : ''
-            if (thinking) {
-              const streamEvents = startedThinkingBlockIndexes.has(index)
-                ? [createThinkingDeltaStreamEvent(index, thinking)]
-                : emitThinkingStreamEvent(index, thinking)
-              if (streamEvents.length > 0) {
-                startedThinkingBlockIndexes.add(index)
-                for (const streamEvent of streamEvents) {
-                  yield streamEvent
-                }
-              }
-            }
-            if (startedThinkingBlockIndexes.delete(index)) {
-              yield createBlockStopStreamEvent(index)
-            }
-          } else if (itemType === 'function_call') {
-            if (openToolUseBlockIndexes.delete(index)) {
-              yield createBlockStopStreamEvent(index)
-            }
-          } else if (isOpenAIDisplayOnlyNativeItemType(itemType)) {
-            // Built-in/custom native items stay display-only on this backend,
-            // but surfacing them at item completion avoids a long silent gap
-            // before the final completed-response transcript is materialized.
-            const streamedItem =
-              (event.item as OpenAIResponseOutputItem | undefined) ??
-              streamedNativeItems.get(index)
+          case 'response.content_part.added': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            const partType = event.part?.type
             if (
-              streamedItem &&
-              isOpenAIDisplayOnlyNativeItemType(streamedItem.type) &&
+              (partType === 'output_text' || partType === 'refusal') &&
               !startedTextBlockIndexes.has(index)
             ) {
-              const summary =
-                streamedItem.type === 'custom_tool_call'
-              ? buildOpenAICustomToolCallStreamText(streamedItem)
-                  : summarizeOpenAINativeStreamItem(streamedItem)
-              const streamEvents = emitTextStreamEvent(index, summary || '')
-              if (streamEvents.length > 0) {
-                startedTextBlockIndexes.add(index)
-                for (const streamEvent of streamEvents) {
-                  yield streamEvent
+              startedTextBlockIndexes.add(index)
+              yield emit(createTextBlockStartStreamEvent(index))
+            } else if (
+              partType &&
+              outputItemTypes.get(index) === 'message' &&
+              partType !== 'output_text' &&
+              partType !== 'output_audio' &&
+              partType !== 'refusal'
+            ) {
+              maybeLogResponsesDegradation(
+                'unsupported message content part',
+                partType,
+                'streamed content part is not projected into Claude-style text blocks',
+              )
+            }
+            break
+          }
+          case 'response.output_text.delta': {
+            const text = event.delta || ''
+            if (!text) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            appendStreamText(streamedTextContent, index, text)
+            if (!startedTextBlockIndexes.has(index)) {
+              startedTextBlockIndexes.add(index)
+              yield emit(createTextBlockStartStreamEvent(index))
+            }
+            yield emit(createTextDeltaStreamEvent(index, text))
+            break
+          }
+          case 'response.output_text.done': {
+            break
+          }
+          case 'response.output_audio.delta':
+          case 'response.output_audio.done': {
+            break
+          }
+          case 'response.output_audio_transcript.delta': {
+            const text = event.delta || ''
+            if (!text) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            audioTranscriptStreamedParts.add(
+              getStreamContentPartKey(event, outputIndexes),
+            )
+            appendStreamText(streamedTextContent, index, text)
+            if (!startedTextBlockIndexes.has(index)) {
+              startedTextBlockIndexes.add(index)
+              yield emit(createTextBlockStartStreamEvent(index))
+            }
+            yield emit(createTextDeltaStreamEvent(index, text))
+            break
+          }
+          case 'response.output_audio_transcript.done': {
+            const text = event.transcript || ''
+            if (!text) break
+            const key = getStreamContentPartKey(event, outputIndexes)
+            if (audioTranscriptStreamedParts.has(key)) {
+              break
+            }
+
+            audioTranscriptStreamedParts.add(key)
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            appendStreamText(streamedTextContent, index, text)
+            if (!startedTextBlockIndexes.has(index)) {
+              startedTextBlockIndexes.add(index)
+              yield emit(createTextBlockStartStreamEvent(index))
+            }
+            yield emit(createTextDeltaStreamEvent(index, text))
+            break
+          }
+          case 'response.refusal.delta': {
+            const text = event.delta || ''
+            if (!text) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            appendStreamText(streamedTextContent, index, text)
+            if (!startedTextBlockIndexes.has(index)) {
+              startedTextBlockIndexes.add(index)
+              yield emit(createTextBlockStartStreamEvent(index))
+            }
+            yield emit(createTextDeltaStreamEvent(index, text))
+            break
+          }
+          case 'response.refusal.done':
+          case 'response.content_part.done':
+            break
+          case 'response.reasoning_summary_part.added': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            const partCount = reasoningSummaryPartCounts.get(index) ?? 0
+            reasoningSummaryPartCounts.set(index, partCount + 1)
+            reasoningSummarySeenIndexes.add(index)
+
+            if (!startedThinkingBlockIndexes.has(index)) {
+              startedThinkingBlockIndexes.add(index)
+              yield emit(createThinkingBlockStartStreamEvent(index))
+            }
+
+            if (partCount > 0) {
+              appendStreamText(streamedReasoningContent, index, '\n\n')
+              yield emit(createThinkingDeltaStreamEvent(index, '\n\n'))
+            }
+            break
+          }
+          case 'response.reasoning_summary_part.done':
+            break
+          case 'response.reasoning_summary_text.delta': {
+            const thinking = event.delta || ''
+            if (!thinking) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            reasoningSummarySeenIndexes.add(index)
+            appendStreamText(streamedReasoningContent, index, thinking)
+            if (!startedThinkingBlockIndexes.has(index)) {
+              startedThinkingBlockIndexes.add(index)
+              yield emit(createThinkingBlockStartStreamEvent(index))
+            }
+            yield emit(createThinkingDeltaStreamEvent(index, thinking))
+            break
+          }
+          case 'response.reasoning_summary_text.done':
+            break
+          case 'response.reasoning_text.delta': {
+            const thinking = event.delta || ''
+            if (!thinking) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            if (reasoningSummarySeenIndexes.has(index)) {
+              break
+            }
+            appendStreamText(streamedReasoningContent, index, thinking)
+            if (!startedThinkingBlockIndexes.has(index)) {
+              startedThinkingBlockIndexes.add(index)
+              yield emit(createThinkingBlockStartStreamEvent(index))
+            }
+            yield emit(createThinkingDeltaStreamEvent(index, thinking))
+            break
+          }
+          case 'response.reasoning_text.done':
+            break
+          case 'response.function_call_arguments.delta': {
+            const partialJson = event.delta || ''
+            if (!partialJson) break
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            appendStreamText(streamedFunctionArguments, index, partialJson)
+            yield emit(createToolUseDeltaStreamEvent(index, partialJson))
+            break
+          }
+          case 'response.function_call_arguments.done': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            if (event.item?.type === 'function_call') {
+              streamedFunctionCalls.set(index, event.item)
+            }
+            if (openToolUseBlockIndexes.delete(index)) {
+              yield emit(createBlockStopStreamEvent(index))
+            }
+            break
+          }
+          case 'response.custom_tool_call_input.delta':
+          case 'response.custom_tool_call_input.done': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            const streamedItem = event.item ?? streamedNativeItems.get(index)
+            if (streamedItem) {
+              streamedNativeItems.set(index, streamedItem)
+            }
+
+            if (
+              event.type === 'response.custom_tool_call_input.done' &&
+              customToolInputStreamedIndexes.has(index)
+            ) {
+              break
+            }
+
+            const inputChunk =
+              event.type === 'response.custom_tool_call_input.done'
+                ? event.input || ''
+                : event.delta || ''
+            if (
+              event.type === 'response.custom_tool_call_input.delta' &&
+              inputChunk
+            ) {
+              customToolInputStreamedIndexes.add(index)
+            }
+            appendStreamText(streamedTextContent, index, inputChunk)
+            if (!startedTextBlockIndexes.has(index)) {
+              const initialText = streamedItem
+                ? buildOpenAICustomToolCallStreamText(streamedItem, inputChunk)
+                : inputChunk
+              const streamEvents = emitTextStreamEvent(index, initialText)
+              if (streamEvents.length === 0) {
+                break
+              }
+              startedTextBlockIndexes.add(index)
+              for (const streamEvent of streamEvents) {
+                yield emit(streamEvent)
+              }
+              break
+            }
+
+            if (inputChunk) {
+              yield emit(createTextDeltaStreamEvent(index, inputChunk))
+            }
+            break
+          }
+          case 'response.image_generation_call.in_progress':
+          case 'response.image_generation_call.generating':
+          case 'response.image_generation_call.completed': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            const existing = streamedNativeItems.get(index)
+            const status = event.type.slice(
+              'response.image_generation_call.'.length,
+            )
+            streamedNativeItems.set(index, {
+              ...(existing?.type === 'image_generation_call' ? existing : {}),
+              type: 'image_generation_call',
+              ...(event.item_id ? { id: event.item_id } : {}),
+              status,
+            })
+            break
+          }
+          case 'response.image_generation_call.partial_image': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            const existing = streamedNativeItems.get(index)
+            const previousCount =
+              existing?.type === 'image_generation_call' &&
+              typeof existing.partial_image_count === 'number'
+                ? existing.partial_image_count
+                : 0
+            const partialImageCount =
+              typeof event.partial_image_index === 'number'
+                ? Math.max(previousCount, event.partial_image_index + 1)
+                : previousCount + 1
+
+            streamedNativeItems.set(index, {
+              ...(existing?.type === 'image_generation_call' ? existing : {}),
+              type: 'image_generation_call',
+              ...(event.item_id ? { id: event.item_id } : {}),
+              status: 'generating',
+              partial_image_count: partialImageCount,
+            })
+            break
+          }
+          case 'response.output_text.annotation.added': {
+            if (!event.annotation || !event.item_id) {
+              break
+            }
+
+            const key = buildOpenAIContentPartKey(
+              event.item_id,
+              event.content_index ?? 0,
+            )
+            streamedAnnotations.set(key, [
+              ...(streamedAnnotations.get(key) ?? []),
+              event.annotation,
+            ])
+            break
+          }
+          case 'response.output_item.done': {
+            const index = getOutputIndexForStreamEvent(event, outputIndexes)
+            if (event.item) {
+              streamedCompletedOutputItems.set(index, event.item)
+            }
+            if (event.item?.id) {
+              outputIndexes.set(event.item.id, index)
+            }
+            if (event.item?.type) {
+              outputItemTypes.set(index, event.item.type)
+            }
+            if (event.item?.type === 'function_call') {
+              streamedFunctionCalls.set(index, event.item)
+            }
+            const itemType = event.item?.type ?? outputItemTypes.get(index)
+            if (itemType === 'message') {
+              const text =
+                event.item?.type === 'message'
+                  ? extractOpenAIResponseMessageText(event.item)
+                  : ''
+              if (text) {
+                appendStreamText(streamedTextContent, index, text)
+                const streamEvents = startedTextBlockIndexes.has(index)
+                  ? [createTextDeltaStreamEvent(index, text)]
+                  : emitTextStreamEvent(index, text)
+                if (streamEvents.length > 0) {
+                  startedTextBlockIndexes.add(index)
+                  for (const streamEvent of streamEvents) {
+                    yield emit(streamEvent)
+                  }
                 }
               }
-            }
+              if (startedTextBlockIndexes.delete(index)) {
+                yield emit(createBlockStopStreamEvent(index))
+              }
+            } else if (itemType === 'reasoning') {
+              const thinking =
+                event.item?.type === 'reasoning'
+                  ? extractOpenAIResponseReasoningText(event.item)
+                  : ''
+              if (thinking) {
+                appendStreamText(streamedReasoningContent, index, thinking)
+                const streamEvents = startedThinkingBlockIndexes.has(index)
+                  ? [createThinkingDeltaStreamEvent(index, thinking)]
+                  : emitThinkingStreamEvent(index, thinking)
+                if (streamEvents.length > 0) {
+                  startedThinkingBlockIndexes.add(index)
+                  for (const streamEvent of streamEvents) {
+                    yield emit(streamEvent)
+                  }
+                }
+              }
+              if (startedThinkingBlockIndexes.delete(index)) {
+                yield emit(createBlockStopStreamEvent(index))
+              }
+            } else if (itemType === 'function_call') {
+              if (openToolUseBlockIndexes.delete(index)) {
+                yield emit(createBlockStopStreamEvent(index))
+              }
+            } else if (isOpenAIDisplayOnlyNativeItemType(itemType)) {
+              const streamedItem =
+                (event.item as OpenAIResponseOutputItem | undefined) ??
+                streamedNativeItems.get(index)
+              if (
+                streamedItem &&
+                isOpenAIDisplayOnlyNativeItemType(streamedItem.type) &&
+                !startedTextBlockIndexes.has(index)
+              ) {
+                const summary =
+                  streamedItem.type === 'custom_tool_call'
+                    ? buildOpenAICustomToolCallStreamText(streamedItem)
+                    : summarizeOpenAINativeStreamItem(streamedItem)
+                appendStreamText(streamedTextContent, index, summary || '')
+                const streamEvents = emitTextStreamEvent(index, summary || '')
+                if (streamEvents.length > 0) {
+                  startedTextBlockIndexes.add(index)
+                  for (const streamEvent of streamEvents) {
+                    yield emit(streamEvent)
+                  }
+                }
+              }
 
-            if (startedTextBlockIndexes.delete(index)) {
-              yield createBlockStopStreamEvent(index)
+              if (startedTextBlockIndexes.delete(index)) {
+                yield emit(createBlockStopStreamEvent(index))
+              }
+              streamedNativeItems.delete(index)
+              customToolInputStreamedIndexes.delete(index)
             }
-            streamedNativeItems.delete(index)
-            customToolInputStreamedIndexes.delete(index)
+            break
           }
-          break
+          case 'error': {
+            const content =
+              event.error?.message ||
+              'OpenAI Responses returned an error streaming event.'
+            yield emit(
+              createAssistantAPIErrorMessage({
+                content,
+                ...(isRecoverableOpenAIResponsesErrorMessage(content)
+                  ? { error: 'unknown' }
+                  : {}),
+              }),
+            )
+            return
+          }
+          case 'response.failed':
+          case 'response.incomplete': {
+            const content = getStreamEventErrorMessage(event)
+            yield emit(
+              createAssistantAPIErrorMessage({
+                content,
+                ...(isRecoverableOpenAIResponsesErrorMessage(content)
+                  ? { error: 'unknown' }
+                  : {}),
+              }),
+            )
+            return
+          }
+          case 'response.completed': {
+            responseIdFromStream = event.response.id
+            completedResponse = event.response
+            yield emit(createMessageStopStreamEvent())
+            break
+          }
+          default:
+            maybeLogResponsesDegradation(
+              'unknown stream event',
+              event.type,
+              'event will be ignored unless mapped explicitly',
+            )
+            break
         }
-        case 'error': {
-          const content =
-            event.error?.message ||
-            'OpenAI Responses returned an error streaming event.'
-          yield createAssistantAPIErrorMessage({
-            content,
-            ...(isRecoverableOpenAIResponsesErrorMessage(content)
-              ? { error: 'unknown' }
-              : {}),
-          })
-          return
-        }
-        case 'response.failed':
-        case 'response.incomplete': {
-          const content = getStreamEventErrorMessage(event)
-          yield createAssistantAPIErrorMessage({
-            content,
-            ...(isRecoverableOpenAIResponsesErrorMessage(content)
-              ? { error: 'unknown' }
-              : {}),
-          })
-          return
-        }
-        case 'response.completed': {
-          completedResponse = event.response
-          yield createMessageStopStreamEvent()
-          break
-        }
-        default:
-          maybeLogResponsesDegradation(
-            'unknown stream event',
-            event.type,
-            'event will be ignored unless mapped explicitly',
-          )
-          break
       }
-    }
 
-    if (!completedResponse) {
-      throw new Error(
-        'OpenAI Responses stream finished without a completed response payload.',
+      if (!completedResponse) {
+        completedResponse = synthesizeResponseFromStream({
+          responseId: responseIdFromStream,
+          streamedCompletedOutputItems,
+          streamedTextContent,
+          streamedReasoningContent,
+          streamedFunctionCalls,
+          streamedFunctionArguments,
+          streamedNativeItems,
+        })
+
+        if (completedResponse) {
+          if (startedAssistantMessage) {
+            yield emit(createMessageStopStreamEvent())
+          }
+        } else {
+          throw new Error(
+            'OpenAI Responses stream finished without a completed response payload.',
+          )
+        }
+      } else {
+        completedResponse = mergeStreamedCompletedOutputItems(
+          completedResponse,
+          streamedCompletedOutputItems,
+        )
+      }
+
+      const { assistantMessages, unsupportedItemTypes } =
+        createAssistantMessagesFromResponse(
+          completedResponse,
+          model,
+          streamedAnnotations,
+        )
+
+      if (assistantMessages.length === 0) {
+        yield emit(
+          createAssistantAPIErrorMessage({
+            content:
+              unsupportedItemTypes.length > 0
+                ? `OpenAI Responses returned only unsupported output item types for this backend: ${unsupportedItemTypes.join(', ')}`
+                : completedResponse.error?.message ||
+                  'OpenAI Responses returned no assistant output.',
+          }),
+        )
+        return
+      }
+
+      for (const message of assistantMessages) {
+        yield emit(message)
+      }
+      return
+    } catch (error) {
+      if (
+        shouldRetryOpenAIResponsesRequest(
+          error,
+          attemptIndex,
+          emittedVisibleOutput,
+        )
+      ) {
+        const delayMs = getRecoverableOpenAIResponsesRetryDelayMs(
+          error,
+          attemptIndex,
+        )
+        logForDebugging(
+          `[openaiResponses] recoverable request retry ${attemptIndex + 1}/${OPENAI_RESPONSES_REQUEST_RETRY_DELAYS_MS.length + 1} after ${delayMs}ms: ${error instanceof Error ? error.message : String(error)}`,
+        )
+        if (delayMs > 0) {
+          await sleep(delayMs, params.signal)
+          if (params.signal.aborted) {
+            return
+          }
+        }
+        continue
+      }
+
+      const { content, errorDetails, recoverable } =
+        formatOpenAIResponsesError(error)
+      yield emit(
+        createAssistantAPIErrorMessage({
+          content,
+          ...(recoverable ? { error: 'unknown' } : {}),
+          ...(errorDetails ? { errorDetails } : {}),
+        }),
       )
-    }
-
-    completedResponse = mergeStreamedCompletedOutputItems(
-      completedResponse,
-      streamedCompletedOutputItems,
-    )
-
-    const { assistantMessages, unsupportedItemTypes } =
-      createAssistantMessagesFromResponse(
-        completedResponse,
-        model,
-        streamedAnnotations,
-    )
-
-    if (assistantMessages.length === 0) {
-      yield createAssistantAPIErrorMessage({
-        content:
-          unsupportedItemTypes.length > 0
-            ? `OpenAI Responses returned only unsupported output item types for this backend: ${unsupportedItemTypes.join(', ')}`
-            : completedResponse.error?.message ||
-              'OpenAI Responses returned no assistant output.',
-      })
       return
     }
-
-    for (const message of assistantMessages) {
-      yield message
-    }
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : 'OpenAI Responses request failed'
-    yield createAssistantAPIErrorMessage({
-      content: message,
-      ...(isRecoverableOpenAIResponsesErrorMessage(message)
-        ? { error: 'unknown' }
-        : {}),
-    })
   }
 }
 

@@ -1122,13 +1122,14 @@ export function REPL({
     if (item.tool.name !== 'AskUserQuestion') {
       return false;
     }
-    return startTelegramAskUserQuestionSession({
+    await startTelegramAskUserQuestionSession({
       sessionId,
       toolUseConfirm: item,
       onDone: () => {
         setToolUseConfirmQueue(queue => queue.filter(q => q.toolUseID !== item.toolUseID));
       }
     });
+    return false;
   }, [sessionId]);
   // Sticky footer JSX registered by permission request components (currently
   // only ExitPlanModePermissionRequest). Renders in FullscreenLayout's `bottom`

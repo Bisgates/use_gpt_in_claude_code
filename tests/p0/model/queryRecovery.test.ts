@@ -268,7 +268,7 @@ beforeEach(() => {
 })
 
 describe('query recoverable interruption retry', () => {
-  it('[P0:model] waits 10 seconds before retrying a recoverable network interruption and resumes the same task', async () => {
+  it('[P0:model] retries a recoverable interruption immediately on first attempt and resumes the same task', async () => {
     callModelMock
       .mockImplementationOnce(async function* () {
         yield makeRecoverableError('Network connection failed')
@@ -304,7 +304,7 @@ describe('query recoverable interruption retry', () => {
       } as any),
     )
 
-    expect(sleepMock).toHaveBeenCalledWith(10_000, toolUseContext.abortController.signal)
+    expect(sleepMock).not.toHaveBeenCalled()
     expect(callModelMock).toHaveBeenCalledTimes(2)
     expect(createUserMessageMock).toHaveBeenCalledWith({
       content:
@@ -317,7 +317,7 @@ describe('query recoverable interruption retry', () => {
     })
   })
 
-  it('[P0:model] stops after 30 recoverable retries and then surfaces the interruption error', async () => {
+  it('[P0:model] stops after 3 consecutive recoverable retries and then surfaces the interruption error', async () => {
     callModelMock.mockImplementation(async function* () {
       yield makeRecoverableError('Network connection failed')
     })
@@ -340,16 +340,28 @@ describe('query recoverable interruption retry', () => {
       } as any),
     )
 
-    expect(sleepMock).toHaveBeenCalledTimes(30)
-    expect(callModelMock).toHaveBeenCalledTimes(31)
+    expect(sleepMock).toHaveBeenNthCalledWith(
+      1,
+      1000,
+      expect.any(AbortSignal),
+    )
+    expect(sleepMock).toHaveBeenNthCalledWith(
+      2,
+      3000,
+      expect.any(AbortSignal),
+    )
+    expect(sleepMock).toHaveBeenCalledTimes(2)
+    expect(callModelMock).toHaveBeenCalledTimes(4)
     expect(outputs.at(-1)).toMatchObject({
       type: 'assistant',
       message: { content: [{ type: 'text', text: 'Network connection failed' }] },
     })
   })
 
-  it('[P0:model] cancels cleanly if the user aborts during the 10-second retry wait', async () => {
+  it('[P0:model] cancels cleanly if the user aborts during a delayed recoverable retry wait', async () => {
     callModelMock.mockImplementationOnce(async function* () {
+      yield makeRecoverableError('Network connection failed')
+    }).mockImplementationOnce(async function* () {
       yield makeRecoverableError('Network connection failed')
     })
 
@@ -379,8 +391,9 @@ describe('query recoverable interruption retry', () => {
       } as any),
     )
 
-    expect(callModelMock).toHaveBeenCalledTimes(1)
-    expect(createUserMessageMock).not.toHaveBeenCalled()
+    expect(sleepMock).toHaveBeenCalledTimes(1)
+    expect(callModelMock).toHaveBeenCalledTimes(2)
+    expect(createUserMessageMock).toHaveBeenCalledTimes(1)
     expect(outputs.some(output => output?.isApiErrorMessage)).toBe(false)
   })
 })

@@ -295,6 +295,27 @@ describe('openaiApi fork contracts', () => {
     ).rejects.toThrow('gateway down')
   })
 
+  it('[P0:model] throws a typed OpenAIHTTPError that preserves HTTP status and request id metadata', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response('{"error":{"message":"processing failed"}}', {
+          status: 500,
+          headers: { 'x-request-id': 'req-500' },
+        }),
+      ),
+    )
+
+    const api = await loadOpenAIApiModule({ apiKey: 'typed-key' })
+
+    await expect(api.fetchOpenAIResponse('/responses')).rejects.toMatchObject({
+      name: 'OpenAIHTTPError',
+      status: 500,
+      requestId: 'req-500',
+      message: 'processing failed',
+    })
+  })
+
   it('[P0:model] surfaces missing-auth, OpenAI error payloads, and empty JSON responses as stable public errors', async () => {
     const noKeyApi = await loadOpenAIApiModule({ apiKey: undefined })
     await expect(noKeyApi.fetchOpenAIResponse('/responses')).rejects.toThrow(
