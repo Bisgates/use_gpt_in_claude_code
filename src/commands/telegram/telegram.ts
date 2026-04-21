@@ -219,7 +219,12 @@ async function save(
     }
   }
 
-  saveTelegramConfig({ botToken, chatId, enabled: true })
+  saveTelegramConfig({
+    ...readTelegramConfig(),
+    botToken,
+    chatId,
+    enabled: true,
+  })
   return {
     type: 'text',
     value: `Telegram configured for @${validation.username || 'unknown'}. Run /telegram test to verify.`,

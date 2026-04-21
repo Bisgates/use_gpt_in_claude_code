@@ -63,6 +63,7 @@ describe('telegram/config', () => {
     mockReadFileSync.mockImplementation(() => {
       throw new Error('ENOENT')
     })
+    vi.resetModules()
     const { readTelegramConfig } = await import(
       'src/services/telegram/config.js'
     )

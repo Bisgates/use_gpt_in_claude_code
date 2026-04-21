@@ -116,6 +116,37 @@ describe('telegram command interaction notifications', () => {
     })
   })
 
+  it('preserves remote interaction state when save updates credentials', async () => {
+    mockReadTelegramConfig.mockReturnValue({
+      botToken: 'old-token',
+      chatId: '111',
+      enabled: true,
+      remoteEnabled: true,
+      interactionSessionId: 'session-1',
+      lastUpdateId: 42,
+      remoteDebug: { status: 'ok' },
+    })
+    mockValidateTelegramBot.mockResolvedValue({ ok: true, username: 'newbot' })
+
+    const { call } = await import('src/commands/telegram/telegram.js')
+
+    const result = await call('save new-token 222')
+
+    expect(result).toEqual({
+      type: 'text',
+      value: 'Telegram configured for @newbot. Run /telegram test to verify.',
+    })
+    expect(mockSaveTelegramConfig).toHaveBeenCalledWith({
+      botToken: 'new-token',
+      chatId: '222',
+      enabled: true,
+      remoteEnabled: true,
+      interactionSessionId: 'session-1',
+      lastUpdateId: 42,
+      remoteDebug: { status: 'ok' },
+    })
+  })
+
   it('sends a Telegram notification when clearing inter session', async () => {
     const { call } = await import('src/commands/telegram/telegram.js')
 
