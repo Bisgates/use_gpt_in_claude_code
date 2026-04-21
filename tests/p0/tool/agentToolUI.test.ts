@@ -1,3 +1,4 @@
+import { readFileSync } from 'fs'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('bun:bundle', () => ({
@@ -28,5 +29,19 @@ describe('AgentTool UI', () => {
         },
       ),
     ).not.toThrow()
+  })
+
+  it('keeps the shared search/read summary helper wired into AgentTool UI', () => {
+    const source = readFileSync(
+      new URL('../../../src/tools/AgentTool/UI.tsx', import.meta.url),
+      'utf8',
+    )
+
+    expect(source).toMatch(
+      /getSearchOrReadFromContent,\s*getSearchReadSummaryText/,
+    )
+    expect(source).toContain(
+      'const summaryText = getSearchReadSummaryText(',
+    )
   })
 })
